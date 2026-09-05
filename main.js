@@ -411,6 +411,9 @@ function main() {
     mainWindow.on('move', rememberBounds);
     mainWindow.on('resize', rememberBounds);
 
+    // 見に来たら点滅を止める(気づかせるのが目的なので、見た時点で用は済んでいる)
+    mainWindow.on('focus', () => mainWindow.flashFrame(false));
+
     // ×ボタンなどOS側から閉じる場合はここが呼ばれる。生きているうちに確定させる。
     mainWindow.on('close', () => {
       log.debug('ウィンドウを閉じます');
@@ -503,6 +506,25 @@ function main() {
   ipcMain.on('tab:scrollback-sync', (event, { tabId, content }) => {
     if (tabs.has(tabId)) store.writeScrollback(tabId, content);
     event.returnValue = true;
+  });
+
+  // タブごとのClaude Codeの状態。●の表示はレンダラーが持ち、
+  // main側は「ウィンドウが裏にいても気づける」部分だけを受け持つ。
+  ipcMain.on('tab:status', (_event, { counts, attention }) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+
+    // タスクバーのタイトルにも出す(最小化中やAlt+Tabでも見える)
+    const 見出し = counts.waiting > 0 ? '確認待ち' : counts.busy > 0 ? '作業中' : null;
+    const title = 見出し ? `[${見出し}] kanaterm` : 'kanaterm';
+    if (mainWindow.getTitle() !== title) mainWindow.setTitle(title);
+
+    // 確認待ちになった瞬間だけ点滅させる。見ている最中に光らせても意味がないので、
+    // ウィンドウが前面にある時は鳴らさない。
+    if (attention && !mainWindow.isFocused()) {
+      mainWindow.flashFrame(true);
+      log.info('確認待ちのタブが発生しました', counts);
+    }
+    if (counts.waiting === 0) mainWindow.flashFrame(false);
   });
 
   // 画面キャプチャ(調査用)。設定が有効なときだけレンダラーから送られてくる。
