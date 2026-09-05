@@ -55,6 +55,79 @@ const CAPTURE_QUIET_MS = 300;
 // 前後の文脈が無いとパターンを決められないので調査中は広めに採る。
 const CAPTURE_ROWS = 40;
 
+// --- タブごとのClaude Codeの状態判定 ---------------------------------------
+//
+// 判定の根拠は実際に採取した画面（docs/HISTORY.md 参照）。要点は2つ。
+//
+// 1. 「確認待ち」は文言で確実に分かる。
+//    フォルダの信頼確認・モデル選択・AskUserQuestion のいずれも、フッターに
+//    「Esc to cancel」が出る。採取した6件すべてで一致した。
+// 2. 「作業中」はスピナーの字形ではなく“画面が動き続けていること”で判る。
+//    作業中はスピナーが再描画され続けるため出力が途切れない。字形(✻✽✳)は
+//    バージョンで変わりうるが、この性質は変わらない。
+const STATUS_TICK_MS = 500;
+// これ以内に出力があれば「画面が動いている」= 作業中とみなす
+const STATUS_BUSY_QUIET_MS = 700;
+// 判定に使う画面の行数。フッターさえ入れば足りるので、キャプチャより狭くてよい。
+const STATUS_ROWS = 24;
+// 同じ判定が何回続いたら表示へ反映するか（ちらつき防止）。
+// 信頼確認に答えた直後など、1〜2秒だけ素のプロンプトに見える瞬間があるため、
+// 灰(claude未実行)へ落とすときだけ長めに構える。
+const STATUS_HOLD = { waiting: 2, busy: 2, idle: 2, none: 4 };
+
+const STATUS_LABELS = {
+  none: 'Claude Code は動いていません',
+  idle: '待機中（入力待ち）',
+  busy: '作業中',
+  waiting: '確認待ち',
+};
+
+const RE_CONFIRM = /Esc to cancel/;
+const RE_SPINNER = /^\s*[✻✽✳✢✦∗*]\s+\S.*…/;
+// Claude Code のUIが出ているか（入力ボックスの罫線、またはモード行）。
+// 罫線の字は画面によって違う（入力ボックスは ─、モデル選択は ▔）。
+const RE_CLAUDE_UI = /[─▔]{20,}|[⏵⏸]/;
+
+function classifyTab(t) {
+  if (t.exited) return 'none';
+  const text = screenTail(t.term, STATUS_ROWS);
+
+  // 確認待ちの判定を最優先する。このフッターが出ている時点でClaude Codeは
+  // 動いているので、UIの有無を先に見てはいけない。先に見ると、罫線の字が
+  // 想定と違う確認画面(モデル選択など)を「claude未実行(灰)」に落としてしまう。
+  // 確認待ちの取りこぼしはこの機能の目的そのものを損なう。
+  if (RE_CONFIRM.test(text)) return 'waiting';
+  if (!RE_CLAUDE_UI.test(text)) return 'none';
+  if (Date.now() - t.lastOutputAt < STATUS_BUSY_QUIET_MS) return 'busy';
+  if (text.split('\n').some((line) => RE_SPINNER.test(line))) return 'busy';
+  return 'idle';
+}
+
+/** 一定時間おきに全タブを判定し、落ち着いたものだけ表示へ反映する */
+function tickTabStatuses() {
+  let 新たに確認待ち = false;
+
+  for (const t of tabs.values()) {
+    const next = classifyTab(t);
+    if (next === t.pendingStatus) t.pendingCount += 1;
+    else {
+      t.pendingStatus = next;
+      t.pendingCount = 1;
+    }
+    if (t.status === next || t.pendingCount < (STATUS_HOLD[next] ?? 2)) continue;
+
+    const 直前 = t.status;
+    t.status = next;
+    t.dot.className = `status-dot ${next}`;
+    t.dot.title = STATUS_LABELS[next];
+    if (next === 'waiting' && 直前 !== 'waiting') 新たに確認待ち = true;
+  }
+
+  const counts = { waiting: 0, busy: 0, idle: 0, none: 0 };
+  for (const t of tabs.values()) counts[t.status] += 1;
+  window.ptyApi.reportTabStatus({ counts, attention: 新たに確認待ち });
+}
+
 // --- 表示名 ---------------------------------------------------------------
 
 function shortenCwd(cwd) {
@@ -240,14 +313,17 @@ async function needsPasteConfirm(t, text) {
  */
 function screenTail(term, rows = CAPTURE_ROWS) {
   const buf = term.buffer.active;
-  const end = buf.length;
+  const lineAt = (i) => buf.getLine(i)?.translateToString(true) ?? '';
+
+  // バッファ末尾からそのまま数えてはいけない。
+  // 画面が縦に長く内容が上部だけの場合、末尾は空行ばかりで何も読めなくなる。
+  // まず「最後に文字がある行」まで戻り、そこを基準に遡る。
+  let end = buf.length;
+  while (end > 0 && lineAt(end - 1) === '') end -= 1;
+
   const start = Math.max(0, end - rows);
   const lines = [];
-  for (let i = start; i < end; i++) {
-    lines.push(buf.getLine(i)?.translateToString(true) ?? '');
-  }
-  // 末尾の空行は状態判定に使わないので落とす(差分比較のノイズにもなる)
-  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  for (let i = start; i < end; i++) lines.push(lineAt(i));
   return lines.join('\n');
 }
 
@@ -341,6 +417,10 @@ function createTabRow(tabId, cwd, color, title) {
   tabEl.dataset.tabId = tabId;
   tabEl.style.backgroundColor = PRESETS.tabSwatch(color);
 
+  const dot = document.createElement('span');
+  dot.className = 'status-dot none';
+  dot.title = STATUS_LABELS.none;
+
   const label = document.createElement('span');
   label.className = 'label';
   label.textContent = title || shortenCwd(cwd);
@@ -358,7 +438,7 @@ function createTabRow(tabId, cwd, color, title) {
     requestCloseTab(tabId);
   });
 
-  tabEl.append(label, closeBtn);
+  tabEl.append(dot, label, closeBtn);
   tabEl.addEventListener('click', () => activateTab(tabId));
 
   // タブ本体用の右クリックメニュー(色・名前・閉じる)。
@@ -371,7 +451,7 @@ function createTabRow(tabId, cwd, color, title) {
 
   attachDragHandlers(tabEl, tabId);
   tabList.appendChild(tabEl);
-  return { tabEl, label };
+  return { tabEl, label, dot };
 }
 
 function attachDragHandlers(tabEl, tabId) {
@@ -417,7 +497,7 @@ function createTabUI(tabId, cwd, scrollback, color, title) {
     if (term.hasSelection()) window.ptyApi.copyText(term.getSelection());
   });
 
-  const { tabEl, label } = createTabRow(tabId, cwd, color, title);
+  const { tabEl, label, dot } = createTabRow(tabId, cwd, color, title);
 
   tabs.set(tabId, {
     term,
@@ -440,6 +520,12 @@ function createTabUI(tabId, cwd, scrollback, color, title) {
     lastCapture: null,
     // 最後にプロンプト(OSC 7)が描画された時刻
     lastPromptAt: null,
+    // --- Claude Code の状態 ---
+    dot,
+    status: 'none',        // 表示に反映済みの状態
+    pendingStatus: 'none', // 判定はされたが、まだ回数が足りない状態
+    pendingCount: 0,
+    lastOutputAt: 0,       // 最後に出力が届いた時刻（画面が動いているかの判断に使う）
   });
 
   // main側から明示のアクティブ化指示が来るが、何も表示されない瞬間を作らないよう
@@ -544,6 +630,7 @@ window.ptyApi.onData(({ tabId, data }) => {
   if (!t) return;
   t.term.write(data);
   t.dirty = true;
+  t.lastOutputAt = Date.now();
   if (t.pendingScrollback) scheduleScrollbackRestore(tabId);
   if (currentSettings.captureScreen === true) scheduleScreenCapture(tabId);
 });
@@ -664,6 +751,8 @@ window.addEventListener('contextmenu', (e) => {
 setInterval(() => {
   for (const tabId of tabs.keys()) saveScrollback(tabId);
 }, SCROLLBACK_SAVE_INTERVAL_MS);
+
+setInterval(tickTabStatuses, STATUS_TICK_MS);
 
 // ウィンドウが閉じる直前に最後の画面内容を確定させる。
 // 非同期の送信だとウィンドウ破棄に間に合わないことがあるため、ここだけ同期で送る。

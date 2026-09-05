@@ -56,6 +56,31 @@
     border-left-color: #89b4fa;
     filter: brightness(1.2);
   }
+  /* タブごとのClaude Codeの状態。既定(灰)は「claudeが動いていない」。
+     タブの色分けは背景色を使っているので、●とは表示チャンネルが競合しない。 */
+  .tab .status-dot {
+    flex-shrink: 0;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #585b70;
+  }
+  .tab .status-dot.idle {
+    background: #a6e3a1;
+  }
+  .tab .status-dot.busy {
+    background: #f9e2af;
+  }
+  .tab .status-dot.waiting {
+    background: #f38ba8;
+    animation: dot-blink 1.1s steps(1, end) infinite;
+  }
+  @keyframes dot-blink {
+    50% {
+      opacity: 0.2;
+    }
+  }
+
   /* シェルが終了したタブ(打っても反応しない)を見た目で区別する */
   .tab.exited .label {
     opacity: 0.5;

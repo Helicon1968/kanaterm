@@ -41,6 +41,7 @@ contextBridge.exposeInMainWorld('ptyApi', {
 
   reportError: (kind, detail) => ipcRenderer.send('log:renderer-error', { kind, detail }),
   sendScreenCapture: (payload) => ipcRenderer.send('capture:screen', payload),
+  reportTabStatus: (payload) => ipcRenderer.send('tab:status', payload),
 
   copyText: (text) => ipcRenderer.send('clipboard:copy', text),
   readClipboard: () => ipcRenderer.invoke('clipboard:read'),
