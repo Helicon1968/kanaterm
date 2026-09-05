@@ -274,6 +274,49 @@ function main() {
       });
   }
 
+  /**
+   * 画面キャプチャの切り替え。
+   * 通常のログと違い「画面に見えている文字」がそのまま残るため、
+   * 有効にするときは何が記録されるかを明示して同意を取る。
+   */
+  function setCaptureScreen(on) {
+    if (!on) {
+      applySettings({ captureScreen: false });
+      log.info('画面キャプチャを停止しました');
+      return;
+    }
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+
+    dialog
+      .showMessageBox(mainWindow, {
+        type: 'warning',
+        noLink: true,
+        title: '画面キャプチャ',
+        message: '各タブの画面内容をファイルに記録します。',
+        detail: [
+          'タブごとのClaude Codeの状態(作業中/確認待ち/待機中)を判定する仕組みを',
+          '作るための調査用の機能です。出力が落ち着くたびに、そのタブの画面末尾を',
+          'そのままファイルへ書き出します。',
+          '',
+          '【記録される内容】画面に表示されている文字がそのまま残ります。',
+          'ファイル名やコマンド、コマンドの出力も含まれます。見られたくない内容を',
+          '扱う場合は有効にしないでください。',
+          '',
+          `保存先: ${logger.logDir}`,
+          'ファイル名: screen-capture-YYYYMMDD.log（通常のログとは別ファイル）',
+          `${RETENTION_DAYS}日より古い分は起動時に自動削除されます。`,
+        ].join('\n'),
+        buttons: ['記録を開始する', 'やめる'],
+        defaultId: 1,
+        cancelId: 1,
+      })
+      .then(({ response }) => {
+        if (response !== 0) return;
+        applySettings({ captureScreen: true });
+        log.info('画面キャプチャを開始しました');
+      });
+  }
+
   // --- ウィンドウ ----------------------------------------------------------
 
   function createMainWindow(initial) {
@@ -462,6 +505,23 @@ function main() {
     event.returnValue = true;
   });
 
+  // 画面キャプチャ(調査用)。設定が有効なときだけレンダラーから送られてくる。
+  ipcMain.on('capture:screen', (_event, payload) => {
+    if (settings.captureScreen !== true) return; // 設定を切った直後の取りこぼしを弾く
+    const t = tabs.get(payload.tabId);
+    const header = [
+      '===== ' + new Date().toISOString(),
+      'tab=' + payload.tabId,
+      'name=' + ((t && (t.title || t.cwd)) || '?'),
+      'buffer=' + payload.bufferType,
+      'cursor=' + payload.cursorX + ',' + payload.cursorY,
+      'rows=' + payload.rows,
+      // 直近のプロンプト(OSC 7)からの経過。大きいほど「コマンド実行中」の可能性が高い
+      'sincePrompt=' + (payload.sincePromptMs === null ? 'none' : payload.sincePromptMs + 'ms'),
+    ].join(' | ');
+    logger.appendCapture([header, payload.text, ''].join('\n'));
+  });
+
   // レンダラーで起きた例外。DevToolsを開いていないと消えてしまうのでログへ回す。
   ipcMain.on('log:renderer-error', (_event, { kind, detail }) => {
     logger.scope('renderer').error(String(kind), detail);
@@ -516,6 +576,7 @@ function main() {
         setTheme: (theme) => applySettings({ theme }),
         setConfirmMultilinePaste: (on) => applySettings({ confirmMultilinePaste: on }),
         setDebugLog,
+        setCaptureScreen,
         openLogFolder,
       },
     });

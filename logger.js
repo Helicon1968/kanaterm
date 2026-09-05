@@ -9,14 +9,21 @@
 //   INFO以上 : 常時記録。運用者が見て状況が分かる粒度(起動/タブ/失敗)。
 //   DEBUG    : 右クリックメニューで有効にした時だけ。原因調査用の細かい記録。
 //
-// 【重要】PTYの入出力そのもの(打った内容・画面の中身)は記録しない。
+// 【重要】通常のログにはPTYの入出力そのもの(打った内容・画面の中身)を記録しない。
 // パスワードを打つ場面があるため、DEBUGでもサイズや種別までにとどめる。
+//
+// 例外は appendCapture() で、これは「タブごとのClaude Codeの状態を画面から判定する」
+// ロジックを作るための調査用に、画面に見えている文字をそのまま別ファイルへ残す。
+// 性質が違うので既定は無効、有効化には明示的な同意を求め、ファイルも分けている。
 
 const fs = require('node:fs');
 const path = require('node:path');
 
 const LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
 const FILE_PREFIX = 'kanaterm-';
+// 画面キャプチャは通常のログとは別ファイルにする。
+// 内容の性質(画面に見えている文字がそのまま残る)が違うので、混ぜない。
+const CAPTURE_PREFIX = 'screen-capture-';
 const FILE_SUFFIX = '.log';
 const RETENTION_DAYS = 7;
 const DETAIL_MAX_CHARS = 2000;
@@ -73,6 +80,20 @@ function createLogger(userDataDir) {
     }
   }
 
+  /**
+   * 画面キャプチャを追記する(タブ状態の判定ロジックを作るための調査用)。
+   * 通常のログとは違い、画面に見えている文字がそのまま残る。
+   */
+  function appendCapture(text) {
+    try {
+      fs.mkdirSync(logDir, { recursive: true });
+      const file = path.join(logDir, `${CAPTURE_PREFIX}${dayKey(new Date())}${FILE_SUFFIX}`);
+      fs.appendFileSync(file, `${text}\n`, 'utf8');
+    } catch (_err) {
+      // 調査用なので、書けなくても動作は続ける
+    }
+  }
+
   /** 保存期間を過ぎたログを消す(起動時に一度だけ呼ぶ) */
   function pruneOldLogs() {
     const limit = new Date();
@@ -88,8 +109,10 @@ function createLogger(userDataDir) {
 
     let removed = 0;
     for (const file of files) {
-      if (!file.startsWith(FILE_PREFIX) || !file.endsWith(FILE_SUFFIX)) continue;
-      const key = file.slice(FILE_PREFIX.length, -FILE_SUFFIX.length);
+      if (!file.endsWith(FILE_SUFFIX)) continue;
+      const prefix = [FILE_PREFIX, CAPTURE_PREFIX].find((p) => file.startsWith(p));
+      if (!prefix) continue;
+      const key = file.slice(prefix.length, -FILE_SUFFIX.length);
       if (!/^\d{8}$/.test(key) || key >= limitKey) continue;
       try {
         fs.unlinkSync(path.join(logDir, file));
@@ -113,6 +136,7 @@ function createLogger(userDataDir) {
 
   return {
     scope,
+    appendCapture,
     pruneOldLogs,
     logDir,
     // 設定変更時に即座に反映させたいので、起動時に固定せず都度参照する

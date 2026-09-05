@@ -54,6 +54,12 @@ function buildTerminalMenuTemplate({ settings, actions }) {
           checked: settings.debugLog === true,
           click: () => actions.setDebugLog(settings.debugLog !== true),
         },
+        {
+          label: '画面キャプチャを記録する(調査用)',
+          type: 'checkbox',
+          checked: settings.captureScreen === true,
+          click: () => actions.setCaptureScreen(settings.captureScreen !== true),
+        },
         { type: 'separator' },
         { label: 'ログフォルダを開く', click: actions.openLogFolder },
       ],

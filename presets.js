@@ -11,11 +11,14 @@
 // confirmMultilinePaste: 複数行を貼り付ける前に確認ダイアログを出すか。
 //   シェルは改行を受け取った時点で行を実行してしまうため、既定は「確認する」。
 // debugLog: 詳細ログ(DEBUG)を記録するか。既定はINFO以上のみ。
+// captureScreen: 画面内容をファイルへ書き出すか(タブ状態の判定ロジックを作るための調査用)。
+//   画面に見えている文字がそのまま残るため、既定は無効。
 const DEFAULT_SETTINGS = {
   fontSize: 14,
   theme: 'dark',
   confirmMultilinePaste: true,
   debugLog: false,
+  captureScreen: false,
 };
 
 const FONT_SIZE_PRESETS = [11, 14, 18, 22];
