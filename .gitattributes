@@ -1,0 +1,9 @@
+# 既定はGitに任せる（リポジトリ内はLF、チェックアウト時は環境に合わせる）
+* text=auto
+
+# バッチファイルは必ずCRLFで取り出す。
+# cmd.exe はLFのみの .bat を正しく解釈できず、特に括弧で囲んだ複数行の
+# if ブロックが壊れる（行の途中から実行される、コマンドが認識されない等）。
+# clone する人の core.autocrlf 設定に左右させないため、ここで明示する。
+*.bat text eol=crlf
+*.cmd text eol=crlf
