@@ -20,6 +20,27 @@ if not exist node_modules (
     )
 )
 
+rem The electron package has no postinstall script: the ~200 MB runtime is
+rem downloaded the first time it is launched. Download it here instead, so a
+rem failure is reported up front with a command that actually works.
+rem (The electron package itself suggests "npx install-electron --no" on
+rem  failure, but install.js takes no arguments and npx cannot resolve the
+rem  name unless the package is already installed, so that form fails.)
+if not exist "node_modules\electron\dist\electron.exe" (
+    echo Electron runtime not found. Downloading it now ^(about 200 MB, first time only^)...
+    call node "node_modules\electron\install.js"
+    if errorlevel 1 (
+        echo.
+        echo Failed to download the Electron runtime.
+        echo Retry with this command in this folder:
+        echo     node node_modules\electron\install.js
+        echo Behind a proxy, set HTTPS_PROXY first.
+        echo To use a mirror, set ELECTRON_MIRROR.
+        pause
+        exit /b 1
+    )
+)
+
 call npm start
 if errorlevel 1 (
     echo Failed to start kanaterm. Check the log above.
