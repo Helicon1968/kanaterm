@@ -1,0 +1,16 @@
+# 依存パッケージ(npm installで復元できるため追跡しない)
+node_modules/
+
+# パッケージ化の出力先(将来electron-builder等を使う場合)
+dist/
+out/
+
+# ログ
+npm-debug.log*
+*.log
+
+# エディタ・OS由来
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

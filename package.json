@@ -1,0 +1,25 @@
+{
+  "name": "kanaterm",
+  "version": "0.1.0",
+  "private": true,
+  "description": "日本語IME対応・タブ管理・セッション復元機能を備えた、Windows向け自作ターミナルエミュレータ",
+  "main": "main.js",
+  "license": "MIT",
+  "author": "Tetsuya",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Helicon1968/kanaterm.git"
+  },
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^44.2.0"
+  },
+  "dependencies": {
+    "@lydell/node-pty": "^1.2.0-beta.15",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/xterm": "^6.0.0"
+  }
+}
