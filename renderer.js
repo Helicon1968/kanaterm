@@ -47,6 +47,14 @@ const RESTORE_QUIET_MS = 200;
 // 複数行の貼り付け確認ダイアログに載せる最大行数
 const PASTE_PREVIEW_LINES = 10;
 
+// --- 画面キャプチャ（タブ状態の判定ロジックを作るための調査用） -------------
+// 出力が止まってから判定するのが要点。TUIは同じ領域を何度も塗り直すため、
+// 描画の途中を読むと「作業中の一瞬の絵」を状態と誤認する。
+const CAPTURE_QUIET_MS = 300;
+// 画面末尾から何行を対象にするか。判定に使うのは末尾の数行だが、
+// 前後の文脈が無いとパターンを決められないので調査中は広めに採る。
+const CAPTURE_ROWS = 40;
+
 // --- 表示名 ---------------------------------------------------------------
 
 function shortenCwd(cwd) {
@@ -225,6 +233,50 @@ async function needsPasteConfirm(t, text) {
   return true;
 }
 
+/**
+ * 画面末尾のテキストを取り出す。
+ * viewportY(今スクロールして見えている位置)ではなく buffer の末尾を基準にするので、
+ * 利用者がスクロールバックを遡っていても判定結果が変わらない。
+ */
+function screenTail(term, rows = CAPTURE_ROWS) {
+  const buf = term.buffer.active;
+  const end = buf.length;
+  const start = Math.max(0, end - rows);
+  const lines = [];
+  for (let i = start; i < end; i++) {
+    lines.push(buf.getLine(i)?.translateToString(true) ?? '');
+  }
+  // 末尾の空行は状態判定に使わないので落とす(差分比較のノイズにもなる)
+  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  return lines.join('\n');
+}
+
+/** 出力が落ち着いたら、そのタブの画面末尾を調査用に書き出す */
+function scheduleScreenCapture(tabId) {
+  const t = tabs.get(tabId);
+  if (!t) return;
+  clearTimeout(t.captureTimer);
+  t.captureTimer = setTimeout(() => {
+    if (currentSettings.captureScreen !== true) return;
+    const text = screenTail(t.term);
+    if (text === t.lastCapture) return; // 変化が無ければ書かない
+    t.lastCapture = text;
+
+    const buf = t.term.buffer.active;
+    window.ptyApi.sendScreenCapture({
+      tabId,
+      text,
+      bufferType: buf.type,
+      cursorX: buf.cursorX,
+      cursorY: buf.cursorY,
+      rows: text ? text.split('\n').length : 0,
+      // シェル統合のOSC 7はプロンプト描画のたびに届く。
+      // 「直前にプロンプトが出た＝コマンドは動いていない」の目安になる。
+      sincePromptMs: t.lastPromptAt === null ? null : Date.now() - t.lastPromptAt,
+    });
+  }, CAPTURE_QUIET_MS);
+}
+
 function saveScrollback(tabId, { sync = false } = {}) {
   const t = tabs.get(tabId);
   // 内容が変わっていないタブまで毎回シリアライズすると、タブ数に比例して無駄に重くなる
@@ -267,6 +319,8 @@ function createTerminal(tabId, container) {
 
   // シェル統合スクリプトが送るOSC7から解析されたcwdを受け取る
   term.parser.registerOscHandler(7, (data) => {
+    const t0 = tabs.get(tabId);
+    if (t0) t0.lastPromptAt = Date.now();
     const cwdPath = fileUriToWindowsPath(data);
     if (cwdPath) {
       const t = tabs.get(tabId);
@@ -381,6 +435,11 @@ function createTabUI(tabId, cwd, scrollback, color, title) {
     restoreTimer: null,
     // 前回の保存以降に画面が変化したか(定期保存の対象を絞るため)
     dirty: false,
+    // --- 画面キャプチャ(調査用) ---
+    captureTimer: null,
+    lastCapture: null,
+    // 最後にプロンプト(OSC 7)が描画された時刻
+    lastPromptAt: null,
   });
 
   // main側から明示のアクティブ化指示が来るが、何も表示されない瞬間を作らないよう
@@ -391,8 +450,9 @@ function createTabUI(tabId, cwd, scrollback, color, title) {
 function destroyTabUI(tabId) {
   const t = tabs.get(tabId);
   if (!t) return;
-  // 破棄したTerminalに書き込むと例外になるため、復元タイマーを先に止める
+  // 破棄したTerminalに書き込むと例外になるため、各種タイマーを先に止める
   clearTimeout(t.restoreTimer);
+  clearTimeout(t.captureTimer);
   t.term.dispose();
   t.container.remove();
   t.tabEl.remove();
@@ -485,6 +545,7 @@ window.ptyApi.onData(({ tabId, data }) => {
   t.term.write(data);
   t.dirty = true;
   if (t.pendingScrollback) scheduleScrollbackRestore(tabId);
+  if (currentSettings.captureScreen === true) scheduleScreenCapture(tabId);
 });
 
 window.ptyApi.onExit(({ tabId, code }) => {

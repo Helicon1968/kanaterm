@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('ptyApi', {
     ipcRenderer.sendSync('tab:scrollback-sync', { tabId, content }),
 
   reportError: (kind, detail) => ipcRenderer.send('log:renderer-error', { kind, detail }),
+  sendScreenCapture: (payload) => ipcRenderer.send('capture:screen', payload),
 
   copyText: (text) => ipcRenderer.send('clipboard:copy', text),
   readClipboard: () => ipcRenderer.invoke('clipboard:read'),
