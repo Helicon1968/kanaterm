@@ -48,7 +48,31 @@ npm start
 ```
 
 または `start.bat` をダブルクリックしてください。
-`start.bat` は自身の場所を基準に動くため、どこから実行しても構いません。`node_modules` が無ければ初回だけ `npm install` を自動実行します。
+`start.bat` は自身の場所を基準に動くため、どこから実行しても構いません。`node_modules` が無ければ初回だけ `npm install` を、Electron のランタイムが無ければそのダウンロードを自動で行います。
+
+> **初回だけ時間がかかります。** `npm install` では Electron の本体（約200MB）はダウンロードされません。`electron` パッケージには postinstall が無く、**初回起動時に遅延ダウンロードされる**ためです。
+
+## うまく起動しないとき
+
+### `Electron failed to install correctly` と表示される
+
+Electron 本体のダウンロードに失敗しています。ネットワーク、プロキシ、ウイルス対策ソフトのいずれかが原因のことが多いです。このフォルダで次を実行して再試行してください。
+
+```
+node node_modules\electron\install.js
+```
+
+プロキシ環境なら先に `HTTPS_PROXY` を、ダウンロード元を変えたい場合は `ELECTRON_MIRROR` を設定してください。
+
+> **`electron` パッケージが表示する `npx install-electron --no` は、そのままでは動きません。**
+> `install.js` はコマンドライン引数を一切解釈しないので `--no` は無意味です。さらに `npx install-electron` は、`electron` パッケージが既に入っているフォルダの中でしか名前を解決できず、入っていない環境では `npm error could not determine executable to run` になります。上のコマンドなら `npx` を経由しないぶん確実です。
+
+### `node_modules` から作り直したい
+
+```
+npm install
+node node_modules\electron\install.js
+```
 
 ---
 

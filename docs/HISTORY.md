@@ -192,6 +192,29 @@ DevTools で見えるのはレンダラー側の、しかも開いている間�
 - **claude-signal-tray への状態提供。** kanaterm が状態ファイルを書けば signal-tray のCLI検知の穴を埋められるが、signal-tray は Cowork など端末以外との連携も前提にした作りのため、いったん見送った。
 - **OSC 133 によるシェル統合の拡張。** 当初は「コマンドが動いているか」を確定的に取るために必要と考えていたが、画面の内容だけで足りることが実測で分かったため不要になった。なお、既存の OSC 7 の到着時刻（プロンプト描画からの経過時間）も判定に使えるかを検討したが、**シェルのプロンプトで放置しているだけでも値が伸びる**ため使えなかった。
 
+## Electron のランタイムが落ちてこない環境での躓き（2026-09-06）
+
+Electron が入っていない環境で起動したところ、`electron` パッケージが次のエラーを出した。
+
+```
+Electron failed to install correctly. Please delete `node_modules/electron`
+and run "npx install-electron --no" manually.
+```
+
+**この案内どおりに実行しても直らない。** 調べた結果は次のとおり。
+
+- `install.js` は `process.argv` を一切参照しない。したがって `--no` は無意味である。
+- `npx install-electron` は、`electron` パッケージが既に入っているフォルダの中でしか名前を解決できない。入っていない環境では `--no` の有無にかかわらず `npm error could not determine executable to run` になる（実際に `node_modules` の無いディレクトリで再現した）。名前解決に失敗するのは、npm レジストリに `install-electron` というパッケージが存在しないためである。
+
+またこのバージョンの `electron` パッケージには **postinstall スクリプトが無い**。`npm install` の時点では本体（約200MB）は落ちてこず、**初回に `require('electron')` された時点で遅延ダウンロードされる**。つまり「`npm install` は成功したのに、最初の起動で初めて失敗する」という形になり、原因が分かりにくい。
+
+対応として `start.bat` に次を入れた。
+
+- `node_modules\electron\dist\electron.exe` の有無を確認し、無ければ `node node_modules\electron\install.js` で明示的にダウンロードする。`npx` を経由しないので名前解決の問題が起きない。
+- 失敗した場合は、実際に動くコマンドと、プロキシ・ミラーの環境変数を案内する。
+
+これにより、ダウンロードの失敗が「起動時の分かりにくいエラー」ではなく「セットアップ時の明示的なエラー」として出る。
+
 ## 検証方法
 
 GUI アプリのため、目視だけでは「直ったつもり」になりやすい（不具合9がその例）。以下の方法で機械的に確認した。
