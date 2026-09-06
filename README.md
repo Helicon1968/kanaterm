@@ -87,9 +87,12 @@ node node_modules\electron\install.js
 | `Ctrl` + `Tab` | 次のタブへ |
 | `Ctrl` + `Shift` + `Tab` | 前のタブへ |
 | `Ctrl` + `V` / `Ctrl` + `Shift` + `V` | 貼り付け |
+| `Shift` + `Enter` | 改行を入れる（送信しない） |
 | `Ctrl` + `Shift` + `I` | DevTools の開閉 |
 
 `Ctrl` + `C` などその他のキーは、すべてシェルへそのまま渡されます。
+
+`Shift` + `Enter` は `ESC` + `CR` を送ります。Claude Code のように「改行の挿入」と「送信」を区別するTUIで、送信せずに改行を入れるためのものです。`Alt` + `Enter` でも同じ動作になります（こちらは xterm.js の既定）。
 
 ### マウス操作
 
