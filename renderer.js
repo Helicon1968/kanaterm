@@ -47,6 +47,10 @@ const RESTORE_QUIET_MS = 200;
 // 複数行の貼り付け確認ダイアログに載せる最大行数
 const PASTE_PREVIEW_LINES = 10;
 
+// 制御文字はソースに直接書くと読めないので、コード値から作る。
+const ESC = String.fromCharCode(27); // 0x1b
+const CR = String.fromCharCode(13); // 0x0d
+
 // --- 画面キャプチャ（タブ状態の判定ロジックを作るための調査用） -------------
 // 出力が止まってから判定するのが要点。TUIは同じ領域を何度も塗り直すため、
 // 描画の途中を読むと「作業中の一瞬の絵」を状態と誤認する。
@@ -690,6 +694,20 @@ tabList.addEventListener('drop', (e) => {
 function handleShortcut(e) {
   if (!e.key) return false; // IME確定時など key が無いイベントが来ることがある
   const key = e.key.toLowerCase();
+
+  // Shift+Enter で改行を入れる（送信しない）。
+  // Claude Code のようなTUIは「改行の挿入」と「送信」を ESC+CR と CR で区別するが、
+  // xterm.js の Enter は修飾キーを Alt しか見ておらず、
+  //   Alt+Enter   -> ESC + CR
+  //   それ以外    -> CR
+  // となるため、Shift+Enter が送信になってしまう。ここで ESC+CR に振り替える。
+  // term.input() を使うのは、通常の入力と同じく onData を通すため
+  // (PTYへの送信と復元内容の保護解除が既存の経路に乗る)。
+  if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    const t = tabs.get(activeTabId);
+    if (t) t.term.input(ESC + CR);
+    return true;
+  }
 
   // Ctrl+V / Ctrl+Shift+V で貼り付け(Windowsの端末としてはCtrl+Vが自然)
   if (e.ctrlKey && !e.altKey && key === 'v') {

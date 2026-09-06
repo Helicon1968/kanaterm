@@ -215,6 +215,32 @@ and run "npx install-electron --no" manually.
 
 これにより、ダウンロードの失敗が「起動時の分かりにくいエラー」ではなく「セットアップ時の明示的なエラー」として出る。
 
+## Shift+Enter で改行が入らない（2026-09-06）
+
+Claude Code へ指示を入力する際、`Shift` + `Enter` で改行を入れられず、そのまま送信されてしまう。
+
+xterm.js の Enter の扱いは次のようになっており、**Shift を見ていない**。
+
+```js
+case 13: o.key = e.altKey ? ESC + CR : CR, o.cancel = true; break;
+```
+
+- `Alt` + `Enter` → `ESC` + `CR`（`\x1b\r`）
+- それ以外（Shift を押していても） → `CR`
+
+Claude Code は「改行の挿入」と「送信」を `ESC+CR` と `CR` で区別している。これは Claude Code の `/terminal-setup` が他の端末に設定するシーケンスと同じである。つまり **`Alt` + `Enter` は元から動いていた**が、多くの人が使う `Shift` + `Enter` が送信になっていた。
+
+キャプチャフェーズのショートカット処理で `Shift` + `Enter` を捕まえ、`ESC` + `CR` を送るようにした。`term.input()` を使うのは、通常の入力と同じく `onData` を通し、PTYへの送信と復元内容の保護解除を既存の経路に乗せるためである。
+
+実際に Claude Code を動かして確認した。`Shift` + `Enter` の後に文字を打つと入力欄が2行になり、送信されない。
+
+| キー | PTYへ送るバイト |
+| --- | --- |
+| `Enter` | `0x0d` |
+| `Shift` + `Enter` | `0x1b 0x0d` |
+| `Alt` + `Enter` | `0x1b 0x0d` |
+| `Ctrl` + `Enter` | `0x0d` |
+
 ## 検証方法
 
 GUI アプリのため、目視だけでは「直ったつもり」になりやすい（不具合9がその例）。以下の方法で機械的に確認した。
