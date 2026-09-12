@@ -24,6 +24,20 @@ window.addEventListener('unhandledrejection', (e) => {
   });
 });
 
+/**
+ * mainのログファイルへ記録する。
+ * 別環境で起きた不具合は DevTools を開いてもらえないことがあるため、
+ * 後からログだけで経緯を追えるようにしておく。
+ * 【重要】画面の中身や打った文字そのものは渡さない(量や種別までにとどめる)。
+ */
+function logToMain(level, message, detail) {
+  try {
+    window.ptyApi.reportLog(level, message, detail);
+  } catch (_err) {
+    // 記録できないこと自体で操作を止めるわけにはいかない
+  }
+}
+
 const tabList = document.getElementById('tab-list');
 const panes = document.getElementById('panes');
 const newTabBtn = document.getElementById('new-tab-btn');
@@ -39,9 +53,19 @@ let currentSettings = { ...PRESETS.DEFAULT_SETTINGS };
 // という取りこぼしを減らすため)
 const SCROLLBACK_SAVE_INTERVAL_MS = 10000;
 
-// タブ作成直後はシェル起動時の初期描画(リサイズへの応答含む)が何度か届くため、
-// 固定の待ち時間で賭けるのではなく「出力が実際に届くたびにタイマーをリセットし、
-// 一定時間データが来なくなったら最後に復元内容を書き込む」方式にする。
+// 前回終了時の画面内容を、いつ書き戻すか。
+//
+// シェル起動時の初期描画(リサイズへの応答含む)が何度か届くため、書き終わる前に
+// 書き戻すと、そのあとの再描画で消えてしまう。きっかけは2つ用意する。
+//
+//   1. シェル統合が出す OSC 7。これは「プロンプトを描き終えた」という確定的な
+//      合図なので、待ち時間の当てずっぽうが要らない。通常はこちらで決まる。
+//   2. 出力が一定時間途切れたら書き戻す(保険)。実行ポリシー等でシェル統合の
+//      スクリプトが読み込めない環境では OSC 7 が来ないため、1だけにはできない。
+//
+// どちらの経路でも「一度書いたら終わり」にはしない。フォントサイズ変更などで
+// 実際のリサイズが起きるとシェル側の再描画で消えてしまうため、ユーザーが自分で
+// 何か入力するまでは、再描画のたびに何度でも書き戻す。
 const RESTORE_QUIET_MS = 200;
 
 // 複数行の貼り付け確認ダイアログに載せる最大行数
@@ -303,28 +327,69 @@ function fitActive() {
 
 // --- 復元内容(スクロールバック) --------------------------------------------
 
-// ここでは pendingScrollback をあえて消さない(=使い捨てにしない)。
-// フォントサイズ変更など、ユーザーがまだそのタブに何も入力していない間に
-// 実際のリサイズが発生すると、シェル側の再描画で復元内容が消えてしまうため、
-// 「ユーザーが入力するまでは、再描画が起きるたびに何度でも書き戻す」ようにする。
-// ユーザーが実際に入力した時点で clearRestoreGuard() により保護を解除する。
+// pendingScrollback をあえて消さない(=使い捨てにしない)理由は
+// RESTORE_QUIET_MS のコメントを参照。ユーザーが実際に入力した時点で
+// clearRestoreGuard() により保護を解除する。
+
+/** 前回終了時の画面内容を実際に書き戻す */
+function restoreScrollback(tabId, きっかけ) {
+  const t = tabs.get(tabId);
+  if (!t || !t.pendingScrollback) return;
+  clearTimeout(t.restoreTimer);
+  t.restoreTimer = null;
+
+  // 複数回書き戻す可能性があるため、そのたびに一度リセットしてから書く。
+  // クリアせずに書き戻すと、前回分の末尾に継ぎ足されて内容が重複してしまう。
+  t.restoring = true;
+  t.term.reset();
+  t.term.write(t.pendingScrollback, () => {
+    const t2 = tabs.get(tabId);
+    if (t2) t2.restoring = false;
+  });
+
+  t.restoreCount += 1;
+  // 内容そのものは記録しない(パスワードが混じりうるため)。
+  // 「どのきっかけで・どれだけの量を・どの桁数で書いたか」だけ残す。
+  // 復元されない環境の原因を、ログだけで切り分けられるようにするため。
+  const 詳細 = {
+    tabId,
+    きっかけ,
+    文字数: t.pendingScrollback.length,
+    cols: t.term.cols,
+    rows: t.term.rows,
+  };
+  if (t.restoreCount === 1) {
+    logToMain('info', '前回の画面内容を書き戻しました', 詳細);
+  } else {
+    // 2回目以降は再描画に追随しているだけなので、調査時だけ見えれば足りる
+    logToMain('debug', '前回の画面内容を書き戻しました(再描画への追随)', {
+      ...詳細,
+      回数: t.restoreCount,
+    });
+  }
+}
+
+/** 保険の経路。出力が一定時間途切れたら書き戻す */
 function scheduleScrollbackRestore(tabId) {
   const t = tabs.get(tabId);
   if (!t || !t.pendingScrollback) return;
   clearTimeout(t.restoreTimer);
-  t.restoreTimer = setTimeout(() => {
-    if (!t.pendingScrollback) return;
-    // 複数回書き戻す可能性があるため、そのたびに一度リセットしてから書く。
-    // クリアせずに書き戻すと、前回分の末尾に継ぎ足されて内容が重複してしまう。
-    t.term.reset();
-    t.term.write(t.pendingScrollback);
-  }, RESTORE_QUIET_MS);
+  t.restoreTimer = setTimeout(() => restoreScrollback(tabId, '出力が途切れた'), RESTORE_QUIET_MS);
 }
 
 function clearRestoreGuard(tabId) {
   const t = tabs.get(tabId);
   if (!t) return;
+  if (t.pendingScrollback && t.restoreCount === 0) {
+    // 書き戻す前に打たれた場合。以後このタブは復元されないので、
+    // 「出なかった」という相談を受けた時に分かるよう残しておく。
+    logToMain('info', '書き戻す前に入力があったため復元を取りやめました', {
+      tabId,
+      文字数: t.pendingScrollback.length,
+    });
+  }
   t.pendingScrollback = null;
+  t.restoreOnPrompt = false;
   clearTimeout(t.restoreTimer);
   t.restoreTimer = null;
 }
@@ -469,7 +534,14 @@ function createTerminal(tabId, container) {
   // シェル統合スクリプトが送るOSC7から解析されたcwdを受け取る
   term.parser.registerOscHandler(7, (data) => {
     const t0 = tabs.get(tabId);
-    if (t0) t0.lastPromptAt = Date.now();
+    if (t0) {
+      t0.lastPromptAt = Date.now();
+      // OSC 7 が届いた = シェルがプロンプトを描き終えた、という確定的な合図。
+      // ここが前回の画面内容を書き戻すのに一番安全な瞬間になる。
+      // ただし今はまさに解析の最中なので、ここで reset() すると壊れる。
+      // 目印だけ立てて、この塊を解析し終えてから書き戻す(onDataのcallback)。
+      if (t0.pendingScrollback && !t0.restoring) t0.restoreOnPrompt = true;
+    }
     const cwdPath = fileUriToWindowsPath(data);
     if (cwdPath) {
       const t = tabs.get(tabId);
@@ -588,6 +660,12 @@ function createTabUI(tabId, cwd, scrollback, color, title) {
     // 実行していたプロセスそのものは再現できず、あくまで見た目のスナップショット。
     pendingScrollback: scrollback || null,
     restoreTimer: null,
+    // OSC 7(プロンプト描画)を見つけた。この塊の解析が終わり次第書き戻す
+    restoreOnPrompt: false,
+    // 書き戻しの最中か(書き戻した内容で再度きっかけを立てないための目印)
+    restoring: false,
+    // 何回書き戻したか(1回目だけINFO、以降はDEBUGで記録する)
+    restoreCount: 0,
     // 前回の保存以降に画面が変化したか(定期保存の対象を絞るため)
     dirty: false,
     // --- 画面キャプチャ(調査用) ---
@@ -707,7 +785,14 @@ window.ptyApi.onRequestPaste(({ tabId }) => pasteFromClipboard(tabId));
 window.ptyApi.onData(({ tabId, data }) => {
   const t = tabs.get(tabId);
   if (!t) return;
-  t.term.write(data);
+  // 書き込みは内部で順番待ちになるため、解析し終えた時に呼ばれる第2引数を使う。
+  // OSC 7 を見つけていたらここで書き戻す(解析の途中でresetすると画面が壊れる)。
+  t.term.write(data, () => {
+    const t2 = tabs.get(tabId);
+    if (!t2 || !t2.restoreOnPrompt) return;
+    t2.restoreOnPrompt = false;
+    restoreScrollback(tabId, 'プロンプト(OSC 7)');
+  });
   t.dirty = true;
   t.lastOutputAt = Date.now();
   if (t.pendingScrollback) scheduleScrollbackRestore(tabId);

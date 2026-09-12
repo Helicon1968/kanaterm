@@ -93,8 +93,15 @@ function createStore(userDataDir, log = NULL_LOG) {
   function readScrollback(tabId) {
     try {
       return fs.readFileSync(scrollbackPath(tabId), 'utf8');
-    } catch (_err) {
-      return ''; // 新規タブには当然ファイルが無い
+    } catch (err) {
+      // 新規タブには当然ファイルが無いので、それは黙って空を返す。
+      // 一方で権限やパスの問題で読めない場合は「前回の内容が出ない」原因に
+      // なるため、区別して記録する(社内PCなど %APPDATA% が別の場所へ
+      // 向けられている環境で実際に起こりうる)。
+      if (err.code !== 'ENOENT') {
+        log.warn('画面内容を読み込めませんでした', { tabId, err: String(err) });
+      }
+      return '';
     }
   }
 
