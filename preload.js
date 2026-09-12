@@ -40,6 +40,11 @@ contextBridge.exposeInMainWorld('ptyApi', {
     ipcRenderer.sendSync('tab:scrollback-sync', { tabId, content }),
 
   reportError: (kind, detail) => ipcRenderer.send('log:renderer-error', { kind, detail }),
+  // レンダラー側の出来事をmainのログファイルへ回す。
+  // 別環境の不具合は DevTools を開いてもらえないことがあるため、
+  // 後からログだけで追えるようにしておく。
+  reportLog: (level, message, detail) =>
+    ipcRenderer.send('log:renderer', { level, message, detail }),
   sendScreenCapture: (payload) => ipcRenderer.send('capture:screen', payload),
   reportTabStatus: (payload) => ipcRenderer.send('tab:status', payload),
 

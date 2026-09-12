@@ -188,14 +188,23 @@ function main() {
     });
     tabOrder.push(tabId);
     scheduleSave();
-    log.info('タブを作成しました', { tabId, cwd: resolvedCwd, 起動: Boolean(ptyProcess) });
 
     // 既存の(前回セッションで保存された)画面内容があれば一緒に渡す。
     // 新規タブの場合は該当ファイルが無いので空文字になる。
+    // 「復元されない」という相談を受けた時に、渡すものが有ったのかどうかを
+    // まずここで切り分けられるよう、文字数を残しておく(内容は残さない)。
+    const scrollback = store.readScrollback(tabId);
+    log.info('タブを作成しました', {
+      tabId,
+      cwd: resolvedCwd,
+      起動: Boolean(ptyProcess),
+      復元文字数: scrollback.length,
+    });
+
     send('tab:create', {
       id: tabId,
       cwd: resolvedCwd,
-      scrollback: store.readScrollback(tabId),
+      scrollback,
       color,
       title,
     });
@@ -547,6 +556,13 @@ function main() {
   // レンダラーで起きた例外。DevToolsを開いていないと消えてしまうのでログへ回す。
   ipcMain.on('log:renderer-error', (_event, { kind, detail }) => {
     logger.scope('renderer').error(String(kind), detail);
+  });
+
+  // レンダラー側の通常の記録。レベルは決まったものだけ受け付ける。
+  ipcMain.on('log:renderer', (_event, { level, message, detail }) => {
+    const scoped = logger.scope('renderer');
+    const write = { error: scoped.error, warn: scoped.warn, info: scoped.info, debug: scoped.debug };
+    (write[level] || scoped.info)(String(message), detail);
   });
 
   // マウスドラッグで選択したテキストを自動的にクリップボードへコピーする

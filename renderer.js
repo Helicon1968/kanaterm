@@ -24,6 +24,20 @@ window.addEventListener('unhandledrejection', (e) => {
   });
 });
 
+/**
+ * mainのログファイルへ記録する。
+ * 別環境で起きた不具合は DevTools を開いてもらえないことがあるため、
+ * 後からログだけで経緯を追えるようにしておく。
+ * 【重要】画面の中身や打った文字そのものは渡さない(量や種別までにとどめる)。
+ */
+function logToMain(level, message, detail) {
+  try {
+    window.ptyApi.reportLog(level, message, detail);
+  } catch (_err) {
+    // 記録できないこと自体で操作を止めるわけにはいかない
+  }
+}
+
 const tabList = document.getElementById('tab-list');
 const panes = document.getElementById('panes');
 const newTabBtn = document.getElementById('new-tab-btn');
@@ -39,9 +53,19 @@ let currentSettings = { ...PRESETS.DEFAULT_SETTINGS };
 // という取りこぼしを減らすため)
 const SCROLLBACK_SAVE_INTERVAL_MS = 10000;
 
-// タブ作成直後はシェル起動時の初期描画(リサイズへの応答含む)が何度か届くため、
-// 固定の待ち時間で賭けるのではなく「出力が実際に届くたびにタイマーをリセットし、
-// 一定時間データが来なくなったら最後に復元内容を書き込む」方式にする。
+// 前回終了時の画面内容を、いつ書き戻すか。
+//
+// シェル起動時の初期描画(リサイズへの応答含む)が何度か届くため、書き終わる前に
+// 書き戻すと、そのあとの再描画で消えてしまう。きっかけは2つ用意する。
+//
+//   1. シェル統合が出す OSC 7。これは「プロンプトを描き終えた」という確定的な
+//      合図なので、待ち時間の当てずっぽうが要らない。通常はこちらで決まる。
+//   2. 出力が一定時間途切れたら書き戻す(保険)。実行ポリシー等でシェル統合の
+//      スクリプトが読み込めない環境では OSC 7 が来ないため、1だけにはできない。
+//
+// どちらの経路でも「一度書いたら終わり」にはしない。フォントサイズ変更などで
+// 実際のリサイズが起きるとシェル側の再描画で消えてしまうため、ユーザーが自分で
+// 何か入力するまでは、再描画のたびに何度でも書き戻す。
 const RESTORE_QUIET_MS = 200;
 
 // 複数行の貼り付け確認ダイアログに載せる最大行数
@@ -78,6 +102,68 @@ const STATUS_ROWS = 24;
 // 信頼確認に答えた直後など、1〜2秒だけ素のプロンプトに見える瞬間があるため、
 // 灰(claude未実行)へ落とすときだけ長めに構える。
 const STATUS_HOLD = { waiting: 2, busy: 2, idle: 2, none: 4 };
+
+// --- IME(変換候補)の位置 ---------------------------------------------------
+//
+// xterm.js は変換候補を出す位置を「端末のカーソル位置」に合わせる。ところが
+// Claude Code のようなTUIは、応答を書いている間カーソルを出力箇所へ動かす。
+// その最中に日本語を打つと、変換候補が画面の途中(出力中の行)に出てしまい、
+// 確定した文字は最下部の入力欄に入る、というちぐはぐな動きになる。
+//
+// 利用者にとっての入力位置は「出力が落ち着いている時のカーソル位置」なので、
+// それを覚えておき、出力が流れている最中の変換ではそこへ寄せる。
+// 出力が止まっている時は xterm の位置で正しいので、何もしない。
+/**
+ * 変換中、textarea を「利用者から見た入力位置」に押さえ続ける。
+ *
+ * xterm側も変換中に textarea を動かすので、こちらで上書きし直す必要がある。
+ * 当初はタイマーで定期的に直していたが、出力が流れている間はレンダラーが
+ * 描画で埋まり、10ms間隔のタイマーが1.2秒で2回しか回らなかった。まさに
+ * 直したい場面で動かないので、位置が変えられた瞬間に反応する MutationObserver
+ * にしている。こちらは描画の負荷に関係なく確実に呼ばれる。
+ */
+function attachImeAnchor(tabId, term, container) {
+  const textarea = container.querySelector('textarea');
+  const screen = container.querySelector('.xterm-screen');
+  if (!textarea || !screen) return () => {};
+
+  let composing = false;
+  let applying = false; // 自分の書き換えで再入しないようにする
+
+  const apply = () => {
+    if (applying) return;
+    const t = tabs.get(tabId);
+    if (!t || !t.imeAnchor) return;
+    // 出力が止まっていれば端末のカーソル＝入力位置なので、xterm に任せる
+    if (Date.now() - t.lastOutputAt >= STATUS_BUSY_QUIET_MS) return;
+
+    const left = `${Math.round((t.imeAnchor.x * screen.clientWidth) / term.cols)}px`;
+    const top = `${Math.round((t.imeAnchor.y * screen.clientHeight) / term.rows)}px`;
+    if (textarea.style.left === left && textarea.style.top === top) return;
+
+    applying = true;
+    textarea.style.left = left;
+    textarea.style.top = top;
+    applying = false;
+  };
+
+  const observer = new MutationObserver(() => {
+    if (composing) apply();
+  });
+
+  const stop = () => {
+    composing = false;
+    observer.disconnect();
+  };
+
+  textarea.addEventListener('compositionstart', () => {
+    composing = true;
+    observer.observe(textarea, { attributes: true, attributeFilter: ['style'] });
+    apply();
+  });
+  textarea.addEventListener('compositionend', stop);
+  return stop;
+}
 
 const STATUS_LABELS = {
   none: 'Claude Code は動いていません',
@@ -118,6 +204,13 @@ function tickTabStatuses() {
       t.pendingStatus = next;
       t.pendingCount = 1;
     }
+    // 出力が止まっている時のカーソル位置＝利用者から見た入力位置。
+    // 変換候補をここへ寄せるために控えておく(詳細は attachImeAnchor)。
+    if (Date.now() - t.lastOutputAt >= STATUS_BUSY_QUIET_MS) {
+      const buf = t.term.buffer.active;
+      t.imeAnchor = { x: buf.cursorX, y: buf.cursorY };
+    }
+
     if (t.status === next || t.pendingCount < (STATUS_HOLD[next] ?? 2)) continue;
 
     const 直前 = t.status;
@@ -234,28 +327,69 @@ function fitActive() {
 
 // --- 復元内容(スクロールバック) --------------------------------------------
 
-// ここでは pendingScrollback をあえて消さない(=使い捨てにしない)。
-// フォントサイズ変更など、ユーザーがまだそのタブに何も入力していない間に
-// 実際のリサイズが発生すると、シェル側の再描画で復元内容が消えてしまうため、
-// 「ユーザーが入力するまでは、再描画が起きるたびに何度でも書き戻す」ようにする。
-// ユーザーが実際に入力した時点で clearRestoreGuard() により保護を解除する。
+// pendingScrollback をあえて消さない(=使い捨てにしない)理由は
+// RESTORE_QUIET_MS のコメントを参照。ユーザーが実際に入力した時点で
+// clearRestoreGuard() により保護を解除する。
+
+/** 前回終了時の画面内容を実際に書き戻す */
+function restoreScrollback(tabId, きっかけ) {
+  const t = tabs.get(tabId);
+  if (!t || !t.pendingScrollback) return;
+  clearTimeout(t.restoreTimer);
+  t.restoreTimer = null;
+
+  // 複数回書き戻す可能性があるため、そのたびに一度リセットしてから書く。
+  // クリアせずに書き戻すと、前回分の末尾に継ぎ足されて内容が重複してしまう。
+  t.restoring = true;
+  t.term.reset();
+  t.term.write(t.pendingScrollback, () => {
+    const t2 = tabs.get(tabId);
+    if (t2) t2.restoring = false;
+  });
+
+  t.restoreCount += 1;
+  // 内容そのものは記録しない(パスワードが混じりうるため)。
+  // 「どのきっかけで・どれだけの量を・どの桁数で書いたか」だけ残す。
+  // 復元されない環境の原因を、ログだけで切り分けられるようにするため。
+  const 詳細 = {
+    tabId,
+    きっかけ,
+    文字数: t.pendingScrollback.length,
+    cols: t.term.cols,
+    rows: t.term.rows,
+  };
+  if (t.restoreCount === 1) {
+    logToMain('info', '前回の画面内容を書き戻しました', 詳細);
+  } else {
+    // 2回目以降は再描画に追随しているだけなので、調査時だけ見えれば足りる
+    logToMain('debug', '前回の画面内容を書き戻しました(再描画への追随)', {
+      ...詳細,
+      回数: t.restoreCount,
+    });
+  }
+}
+
+/** 保険の経路。出力が一定時間途切れたら書き戻す */
 function scheduleScrollbackRestore(tabId) {
   const t = tabs.get(tabId);
   if (!t || !t.pendingScrollback) return;
   clearTimeout(t.restoreTimer);
-  t.restoreTimer = setTimeout(() => {
-    if (!t.pendingScrollback) return;
-    // 複数回書き戻す可能性があるため、そのたびに一度リセットしてから書く。
-    // クリアせずに書き戻すと、前回分の末尾に継ぎ足されて内容が重複してしまう。
-    t.term.reset();
-    t.term.write(t.pendingScrollback);
-  }, RESTORE_QUIET_MS);
+  t.restoreTimer = setTimeout(() => restoreScrollback(tabId, '出力が途切れた'), RESTORE_QUIET_MS);
 }
 
 function clearRestoreGuard(tabId) {
   const t = tabs.get(tabId);
   if (!t) return;
+  if (t.pendingScrollback && t.restoreCount === 0) {
+    // 書き戻す前に打たれた場合。以後このタブは復元されないので、
+    // 「出なかった」という相談を受けた時に分かるよう残しておく。
+    logToMain('info', '書き戻す前に入力があったため復元を取りやめました', {
+      tabId,
+      文字数: t.pendingScrollback.length,
+    });
+  }
   t.pendingScrollback = null;
+  t.restoreOnPrompt = false;
   clearTimeout(t.restoreTimer);
   t.restoreTimer = null;
 }
@@ -400,7 +534,14 @@ function createTerminal(tabId, container) {
   // シェル統合スクリプトが送るOSC7から解析されたcwdを受け取る
   term.parser.registerOscHandler(7, (data) => {
     const t0 = tabs.get(tabId);
-    if (t0) t0.lastPromptAt = Date.now();
+    if (t0) {
+      t0.lastPromptAt = Date.now();
+      // OSC 7 が届いた = シェルがプロンプトを描き終えた、という確定的な合図。
+      // ここが前回の画面内容を書き戻すのに一番安全な瞬間になる。
+      // ただし今はまさに解析の最中なので、ここで reset() すると壊れる。
+      // 目印だけ立てて、この塊を解析し終えてから書き戻す(onDataのcallback)。
+      if (t0.pendingScrollback && !t0.restoring) t0.restoreOnPrompt = true;
+    }
     const cwdPath = fileUriToWindowsPath(data);
     if (cwdPath) {
       const t = tabs.get(tabId);
@@ -411,7 +552,9 @@ function createTerminal(tabId, container) {
     return true;
   });
 
-  return { term, fitAddon, serializeAddon };
+  const stopImeAnchor = attachImeAnchor(tabId, term, container);
+
+  return { term, fitAddon, serializeAddon, stopImeAnchor };
 }
 
 function createTabRow(tabId, cwd, color, title) {
@@ -492,7 +635,7 @@ function createTabUI(tabId, cwd, scrollback, color, title) {
   container.className = 'pane';
   panes.appendChild(container);
 
-  const { term, fitAddon, serializeAddon } = createTerminal(tabId, container);
+  const { term, fitAddon, serializeAddon, stopImeAnchor } = createTerminal(tabId, container);
 
   // ドラッグで選択した瞬間に自動でクリップボードへコピーする。
   // 右クリック(メニュー表示)でここに入ると選択が意図せず上書きされるので左ボタンのみ。
@@ -517,6 +660,12 @@ function createTabUI(tabId, cwd, scrollback, color, title) {
     // 実行していたプロセスそのものは再現できず、あくまで見た目のスナップショット。
     pendingScrollback: scrollback || null,
     restoreTimer: null,
+    // OSC 7(プロンプト描画)を見つけた。この塊の解析が終わり次第書き戻す
+    restoreOnPrompt: false,
+    // 書き戻しの最中か(書き戻した内容で再度きっかけを立てないための目印)
+    restoring: false,
+    // 何回書き戻したか(1回目だけINFO、以降はDEBUGで記録する)
+    restoreCount: 0,
     // 前回の保存以降に画面が変化したか(定期保存の対象を絞るため)
     dirty: false,
     // --- 画面キャプチャ(調査用) ---
@@ -530,6 +679,9 @@ function createTabUI(tabId, cwd, scrollback, color, title) {
     pendingStatus: 'none', // 判定はされたが、まだ回数が足りない状態
     pendingCount: 0,
     lastOutputAt: 0,       // 最後に出力が届いた時刻（画面が動いているかの判断に使う）
+    // 出力が落ち着いている時のカーソル位置（変換候補をここへ寄せる）
+    imeAnchor: null,
+    stopImeAnchor,
   });
 
   // main側から明示のアクティブ化指示が来るが、何も表示されない瞬間を作らないよう
@@ -543,6 +695,7 @@ function destroyTabUI(tabId) {
   // 破棄したTerminalに書き込むと例外になるため、各種タイマーを先に止める
   clearTimeout(t.restoreTimer);
   clearTimeout(t.captureTimer);
+  t.stopImeAnchor();
   t.term.dispose();
   t.container.remove();
   t.tabEl.remove();
@@ -632,7 +785,14 @@ window.ptyApi.onRequestPaste(({ tabId }) => pasteFromClipboard(tabId));
 window.ptyApi.onData(({ tabId, data }) => {
   const t = tabs.get(tabId);
   if (!t) return;
-  t.term.write(data);
+  // 書き込みは内部で順番待ちになるため、解析し終えた時に呼ばれる第2引数を使う。
+  // OSC 7 を見つけていたらここで書き戻す(解析の途中でresetすると画面が壊れる)。
+  t.term.write(data, () => {
+    const t2 = tabs.get(tabId);
+    if (!t2 || !t2.restoreOnPrompt) return;
+    t2.restoreOnPrompt = false;
+    restoreScrollback(tabId, 'プロンプト(OSC 7)');
+  });
   t.dirty = true;
   t.lastOutputAt = Date.now();
   if (t.pendingScrollback) scheduleScrollbackRestore(tabId);
