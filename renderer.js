@@ -79,6 +79,68 @@ const STATUS_ROWS = 24;
 // 灰(claude未実行)へ落とすときだけ長めに構える。
 const STATUS_HOLD = { waiting: 2, busy: 2, idle: 2, none: 4 };
 
+// --- IME(変換候補)の位置 ---------------------------------------------------
+//
+// xterm.js は変換候補を出す位置を「端末のカーソル位置」に合わせる。ところが
+// Claude Code のようなTUIは、応答を書いている間カーソルを出力箇所へ動かす。
+// その最中に日本語を打つと、変換候補が画面の途中(出力中の行)に出てしまい、
+// 確定した文字は最下部の入力欄に入る、というちぐはぐな動きになる。
+//
+// 利用者にとっての入力位置は「出力が落ち着いている時のカーソル位置」なので、
+// それを覚えておき、出力が流れている最中の変換ではそこへ寄せる。
+// 出力が止まっている時は xterm の位置で正しいので、何もしない。
+/**
+ * 変換中、textarea を「利用者から見た入力位置」に押さえ続ける。
+ *
+ * xterm側も変換中に textarea を動かすので、こちらで上書きし直す必要がある。
+ * 当初はタイマーで定期的に直していたが、出力が流れている間はレンダラーが
+ * 描画で埋まり、10ms間隔のタイマーが1.2秒で2回しか回らなかった。まさに
+ * 直したい場面で動かないので、位置が変えられた瞬間に反応する MutationObserver
+ * にしている。こちらは描画の負荷に関係なく確実に呼ばれる。
+ */
+function attachImeAnchor(tabId, term, container) {
+  const textarea = container.querySelector('textarea');
+  const screen = container.querySelector('.xterm-screen');
+  if (!textarea || !screen) return () => {};
+
+  let composing = false;
+  let applying = false; // 自分の書き換えで再入しないようにする
+
+  const apply = () => {
+    if (applying) return;
+    const t = tabs.get(tabId);
+    if (!t || !t.imeAnchor) return;
+    // 出力が止まっていれば端末のカーソル＝入力位置なので、xterm に任せる
+    if (Date.now() - t.lastOutputAt >= STATUS_BUSY_QUIET_MS) return;
+
+    const left = `${Math.round((t.imeAnchor.x * screen.clientWidth) / term.cols)}px`;
+    const top = `${Math.round((t.imeAnchor.y * screen.clientHeight) / term.rows)}px`;
+    if (textarea.style.left === left && textarea.style.top === top) return;
+
+    applying = true;
+    textarea.style.left = left;
+    textarea.style.top = top;
+    applying = false;
+  };
+
+  const observer = new MutationObserver(() => {
+    if (composing) apply();
+  });
+
+  const stop = () => {
+    composing = false;
+    observer.disconnect();
+  };
+
+  textarea.addEventListener('compositionstart', () => {
+    composing = true;
+    observer.observe(textarea, { attributes: true, attributeFilter: ['style'] });
+    apply();
+  });
+  textarea.addEventListener('compositionend', stop);
+  return stop;
+}
+
 const STATUS_LABELS = {
   none: 'Claude Code は動いていません',
   idle: '待機中（入力待ち）',
@@ -118,6 +180,13 @@ function tickTabStatuses() {
       t.pendingStatus = next;
       t.pendingCount = 1;
     }
+    // 出力が止まっている時のカーソル位置＝利用者から見た入力位置。
+    // 変換候補をここへ寄せるために控えておく(詳細は attachImeAnchor)。
+    if (Date.now() - t.lastOutputAt >= STATUS_BUSY_QUIET_MS) {
+      const buf = t.term.buffer.active;
+      t.imeAnchor = { x: buf.cursorX, y: buf.cursorY };
+    }
+
     if (t.status === next || t.pendingCount < (STATUS_HOLD[next] ?? 2)) continue;
 
     const 直前 = t.status;
@@ -411,7 +480,9 @@ function createTerminal(tabId, container) {
     return true;
   });
 
-  return { term, fitAddon, serializeAddon };
+  const stopImeAnchor = attachImeAnchor(tabId, term, container);
+
+  return { term, fitAddon, serializeAddon, stopImeAnchor };
 }
 
 function createTabRow(tabId, cwd, color, title) {
@@ -492,7 +563,7 @@ function createTabUI(tabId, cwd, scrollback, color, title) {
   container.className = 'pane';
   panes.appendChild(container);
 
-  const { term, fitAddon, serializeAddon } = createTerminal(tabId, container);
+  const { term, fitAddon, serializeAddon, stopImeAnchor } = createTerminal(tabId, container);
 
   // ドラッグで選択した瞬間に自動でクリップボードへコピーする。
   // 右クリック(メニュー表示)でここに入ると選択が意図せず上書きされるので左ボタンのみ。
@@ -530,6 +601,9 @@ function createTabUI(tabId, cwd, scrollback, color, title) {
     pendingStatus: 'none', // 判定はされたが、まだ回数が足りない状態
     pendingCount: 0,
     lastOutputAt: 0,       // 最後に出力が届いた時刻（画面が動いているかの判断に使う）
+    // 出力が落ち着いている時のカーソル位置（変換候補をここへ寄せる）
+    imeAnchor: null,
+    stopImeAnchor,
   });
 
   // main側から明示のアクティブ化指示が来るが、何も表示されない瞬間を作らないよう
@@ -543,6 +617,7 @@ function destroyTabUI(tabId) {
   // 破棄したTerminalに書き込むと例外になるため、各種タイマーを先に止める
   clearTimeout(t.restoreTimer);
   clearTimeout(t.captureTimer);
+  t.stopImeAnchor();
   t.term.dispose();
   t.container.remove();
   t.tabEl.remove();
