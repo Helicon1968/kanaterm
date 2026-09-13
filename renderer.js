@@ -267,7 +267,36 @@ function applyTabColor(tabId, color) {
   const t = tabs.get(tabId);
   if (!t) return;
   t.color = color;
-  t.tabEl.style.backgroundColor = PRESETS.tabSwatch(color);
+  // 色は左端の帯で表す。背景はCSS変数(配色に追従)に任せる。
+  t.tabEl.style.borderLeftColor = PRESETS.tabBarColor(color, currentSettings.theme);
+}
+
+/**
+ * サイドバーの色を今の配色に合わせる。
+ * 端末だけ配色が変わってサイドバーが暗いまま取り残されると、明るい配色を
+ * 選んだときに画面が半端に見えるため、まとめてCSS変数へ流し込む。
+ */
+function applySidebarTheme() {
+  const ui = PRESETS.themeUi(currentSettings.theme);
+  const set = PRESETS.colorSet(currentSettings.theme);
+  const root = document.documentElement.style;
+  root.setProperty('--term-bg', PRESETS.themeColors(currentSettings.theme).background);
+  root.setProperty('--sidebar-bg', ui.sidebar);
+  root.setProperty('--sidebar-active-bg', ui.sidebarActive);
+  root.setProperty('--sidebar-hover-bg', ui.sidebarHover);
+  root.setProperty('--sidebar-border', ui.border);
+  root.setProperty('--sidebar-text', ui.text);
+  root.setProperty('--input-bg', ui.inputBg);
+  root.setProperty('--input-border', ui.inputBorder);
+  // 状態の●もタブの帯と同じ表から引く(明るい地の上で淡い色が沈むのを防ぐ)
+  root.setProperty('--dot-none', set.dim);
+  root.setProperty('--dot-idle', set.green);
+  root.setProperty('--dot-busy', set.yellow);
+  root.setProperty('--dot-waiting', set.red);
+  root.setProperty('--accent', set.blue);
+
+  // 既にあるタブの帯も引き直す(配色が変われば同じ色名でも値が変わるため)
+  for (const [tabId, t] of tabs) applyTabColor(tabId, t.color);
 }
 
 // --- 並び順(DOMが正) ------------------------------------------------------
@@ -562,7 +591,7 @@ function createTabRow(tabId, cwd, color, title) {
   tabEl.className = 'tab';
   tabEl.draggable = true;
   tabEl.dataset.tabId = tabId;
-  tabEl.style.backgroundColor = PRESETS.tabSwatch(color);
+  tabEl.style.borderLeftColor = PRESETS.tabBarColor(color, currentSettings.theme);
 
   const dot = document.createElement('span');
   dot.className = 'status-dot none';
@@ -812,6 +841,7 @@ window.ptyApi.onExit(({ tabId, code }) => {
 
 window.ptyApi.onSettingsInit((settings) => {
   currentSettings = settings;
+  applySidebarTheme();
 });
 
 window.ptyApi.onSettingsApply((settings) => {
@@ -821,6 +851,7 @@ window.ptyApi.onSettingsApply((settings) => {
     t.term.options.fontSize = currentSettings.fontSize;
     t.term.options.theme = theme;
   }
+  applySidebarTheme();
   // アクティブなタブは今すぐ反映。非表示のタブは次にアクティブになった時、
   // fitActive() がサイズの変化を検知して自動的に追従する。
   fitActive();

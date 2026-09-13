@@ -9,11 +9,30 @@
 <title>kanaterm</title>
 <link rel="stylesheet" href="node_modules/@xterm/xterm/css/xterm.css" />
 <style>
+  /* 配色ごとの色は presets.js が持ち、renderer.js がここへ流し込む。
+     初期値はダーク(既定)と同じ値にしてあるので、設定が届く前の一瞬でも
+     ちらつかない。実際の値は applySidebarTheme() を参照。 */
+  :root {
+    --term-bg: #1e1e2e;
+    --sidebar-bg: #181825;
+    --sidebar-active-bg: #313244;
+    --sidebar-hover-bg: #262637;
+    --sidebar-border: #313244;
+    --sidebar-text: #cdd6f4;
+    --input-bg: #313244;
+    --input-border: #585b70;
+    --dot-none: #585b70;
+    --dot-idle: #a6e3a1;
+    --dot-busy: #f9e2af;
+    --dot-waiting: #f38ba8;
+    --accent: #89b4fa;
+  }
+
   html, body {
     margin: 0;
     padding: 0;
     height: 100%;
-    background: #1e1e2e;
+    background: var(--term-bg);
     overflow: hidden;
   }
   body {
@@ -26,9 +45,9 @@
     flex-direction: column;
     width: 200px;
     height: 100vh;
-    background: #181825;
+    background: var(--sidebar-bg);
     flex-shrink: 0;
-    border-right: 1px solid #313244;
+    border-right: 1px solid var(--sidebar-border);
   }
   #tab-list {
     display: flex;
@@ -36,43 +55,52 @@
     flex: 1;
     overflow-y: auto;
   }
+  /* タブの色分けは左端の帯(border-left)で表す。
+     以前は行全体の背景を色にしていたが、その上に文字を読ませる都合で色を
+     暗く抑えるしかなく、色が弱いうえに配色を切り替えても追従できなかった。
+     帯なら文字の可読性と無関係なので、彩度を上げられる。
+     帯の色はJS側でタブごとに指定する(インラインstyle)。 */
   .tab {
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 8px 10px;
-    color: #cdd6f4;
+    color: var(--sidebar-text);
     font: 12px "UDEV Gothic LG", "BIZ UDGothic", sans-serif;
-    background: #181825;
-    border-bottom: 1px solid #313244;
-    border-left: 3px solid transparent;
+    background: var(--sidebar-bg);
+    border-bottom: 1px solid var(--sidebar-border);
+    border-left: 5px solid transparent;
     cursor: pointer;
   }
-  /* 背景色はJS側でタブごとに直接指定する(インラインstyle)ため、
-     アクティブ状態は背景の上書きではなく、左のアクセント線+明るさで表す。
-     こうしないとタブ固有の色(インラインstyle)がクラスの背景指定に勝ってしまい、
-     アクティブ表示が効かなくなる。 */
+  .tab:hover {
+    background: var(--sidebar-hover-bg);
+  }
+  /* 帯を色分けに使うので、アクティブ表示は背景と太字で表す。
+     以前使っていた filter: brightness() はタブの色そのものを変えてしまい、
+     アクティブかどうかで同じ色が違って見えるため使わない。 */
   .tab.active {
-    border-left-color: #89b4fa;
-    filter: brightness(1.2);
+    background: var(--sidebar-active-bg);
+  }
+  .tab.active .label {
+    font-weight: bold;
   }
   /* タブごとのClaude Codeの状態。既定(灰)は「claudeが動いていない」。
-     タブの色分けは背景色を使っているので、●とは表示チャンネルが競合しない。 */
+     色分けは左の帯なので、●とは表示チャンネルが競合しない。 */
   .tab .status-dot {
     flex-shrink: 0;
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: #585b70;
+    background: var(--dot-none);
   }
   .tab .status-dot.idle {
-    background: #a6e3a1;
+    background: var(--dot-idle);
   }
   .tab .status-dot.busy {
-    background: #f9e2af;
+    background: var(--dot-busy);
   }
   .tab .status-dot.waiting {
-    background: #f38ba8;
+    background: var(--dot-waiting);
     animation: dot-blink 1.1s steps(1, end) infinite;
   }
   @keyframes dot-blink {
@@ -87,7 +115,7 @@
     text-decoration: line-through;
   }
   .tab.drag-over {
-    box-shadow: inset 0 2px 0 #89b4fa;
+    box-shadow: inset 0 2px 0 var(--accent);
   }
   .tab .label {
     flex: 1;
@@ -100,8 +128,8 @@
     min-width: 0;
     font: inherit;
     color: inherit;
-    background: #313244;
-    border: 1px solid #585b70;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
     border-radius: 2px;
     padding: 1px 4px;
   }
@@ -112,20 +140,20 @@
   }
   .tab .close:hover {
     opacity: 1;
-    color: #f38ba8;
+    color: var(--dot-waiting);
   }
   #new-tab-btn {
     height: 34px;
-    color: #cdd6f4;
-    background: #181825;
+    color: var(--sidebar-text);
+    background: var(--sidebar-bg);
     border: none;
-    border-top: 1px solid #313244;
+    border-top: 1px solid var(--sidebar-border);
     cursor: pointer;
     font-size: 16px;
     flex-shrink: 0;
   }
   #new-tab-btn:hover {
-    background: #313244;
+    background: var(--sidebar-hover-bg);
   }
 
   #panes {
