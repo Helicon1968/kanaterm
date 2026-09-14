@@ -71,6 +71,12 @@ const RESTORE_QUIET_MS = 200;
 // 複数行の貼り付け確認ダイアログに載せる最大行数
 const PASTE_PREVIEW_LINES = 10;
 
+// 「人が操作した」とみなす有効期間。
+// キー・貼り付け・IMEの直後に端末から出ていくデータだけを利用者の入力と数える。
+// 端末は利用者の入力以外でも応答を返すため(下の markUserAction を参照)、
+// これが無いと起動直後の問い合わせを入力と誤認してしまう。
+const USER_ACTION_WINDOW_MS = 500;
+
 // 制御文字はソースに直接書くと読めないので、コード値から作る。
 const ESC = String.fromCharCode(27); // 0x1b
 const CR = String.fromCharCode(13); // 0x0d
@@ -360,6 +366,44 @@ function fitActive() {
 // RESTORE_QUIET_MS のコメントを参照。ユーザーが実際に入力した時点で
 // clearRestoreGuard() により保護を解除する。
 
+/**
+ * 「今、人が操作した」印をつける。
+ *
+ * 端末は利用者の入力以外でもシェルへデータを送り返す。カーソル位置や端末種別の
+ * 問い合わせ(DSR/DA)、背景色の問い合わせ(OSC 11)、フォーカス通知(1004)などが
+ * それで、xterm.js はこれらの答えを入力と同じ経路(onData)で送り出す。
+ *
+ * これを「利用者が入力した」と数えてしまうと、起動直後にシェルやプロンプトが
+ * 端末へ問い合わせただけで復元が取りやめになる。実際、会社の環境で8タブすべてが
+ * これに当たり、一度も書き戻されないままになっていた。
+ *
+ * そこでキー・貼り付け・IMEという人の操作を直接拾い、その直後に出ていった
+ * データだけを入力とみなす。
+ */
+function markUserAction(tabId) {
+  const t = tabs.get(tabId);
+  if (t) t.userActionAt = Date.now();
+}
+
+function isUserInput(tabId) {
+  const t = tabs.get(tabId);
+  return Boolean(t && t.userActionAt && Date.now() - t.userActionAt < USER_ACTION_WINDOW_MS);
+}
+
+/**
+ * 端末が返した自動応答の種類を見分ける(記録用)。
+ * 中身そのものは残さず、種類と長さだけを記録する。
+ */
+function classifyAutoReply(data) {
+  if (data === ESC + '[I' || data === ESC + '[O') return 'フォーカス通知';
+  if (/^\u001b\[\d+;\d+R$/.test(data)) return 'カーソル位置(DSR)';
+  if (/^\u001b\[\??[\d;>]*c$/.test(data)) return '端末種別(DA)';
+  if (/^\u001b\[\d*n$/.test(data)) return '状態(DSR)';
+  if (data.startsWith(ESC + ']')) return '色などの問い合わせへの応答(OSC)';
+  if (data.startsWith(ESC)) return 'その他の制御応答';
+  return 'その他';
+}
+
 /** 前回終了時の画面内容を実際に書き戻す */
 function restoreScrollback(tabId, きっかけ) {
   const t = tabs.get(tabId);
@@ -459,6 +503,8 @@ async function pasteFromClipboard(tabId) {
     if (!ok) return;
   }
 
+  // 右クリックメニュー経由だとDOMのpasteイベントを伴わないため、明示的に印をつける
+  markUserAction(tabId);
   t.term.paste(text);
   // 確認ダイアログや右クリックメニューでフォーカスが外れているので戻す
   t.term.focus();
@@ -556,9 +602,33 @@ function createTerminal(tabId, container) {
   term.onData((data) => {
     window.ptyApi.write(tabId, data);
     // ユーザーが実際に入力した時点で、復元内容を守る必要はなくなる
-    // (以後の再描画は通常の操作によるものなので、そのまま任せてよい)
-    clearRestoreGuard(tabId);
+    // (以後の再描画は通常の操作によるものなので、そのまま任せてよい)。
+    // ここに来るデータには端末からの自動応答も混じるため、人の操作が
+    // 直前にあった時だけ解除する。
+    if (isUserInput(tabId)) {
+      clearRestoreGuard(tabId);
+      return;
+    }
+    // 復元を待っている間だけ、自動応答が来たことを残す。
+    // 「復元されない」相談を受けた時に、どの問い合わせが飛んでいるかを
+    // 中身を残さずに確かめられるようにするため。
+    const t = tabs.get(tabId);
+    if (t && t.pendingScrollback) {
+      logToMain('debug', '端末が自動応答を返しました(入力ではないので復元は維持)', {
+        tabId,
+        種類: classifyAutoReply(data),
+        文字数: data.length,
+      });
+    }
   });
+
+  // 人の操作を xterm より先に拾う(capture)。ここで印をつけておき、
+  // 直後に onData へ流れたデータを「利用者の入力」と判断する。
+  // キーだけは window 側で拾う(下の keydown を参照)。ショートカットの処理で
+  // stopPropagation() するため、ここに付けても届かないことがあるため。
+  for (const type of ['paste', 'compositionstart', 'compositionend']) {
+    container.addEventListener(type, () => markUserAction(tabId), true);
+  }
 
   // シェル統合スクリプトが送るOSC7から解析されたcwdを受け取る
   term.parser.registerOscHandler(7, (data) => {
@@ -695,6 +765,8 @@ function createTabUI(tabId, cwd, scrollback, color, title) {
     restoring: false,
     // 何回書き戻したか(1回目だけINFO、以降はDEBUGで記録する)
     restoreCount: 0,
+    // 最後に人が操作した時刻(キー・貼り付け・IME)。端末からの自動応答と区別する
+    userActionAt: 0,
     // 前回の保存以降に画面が変化したか(定期保存の対象を絞るため)
     dirty: false,
     // --- 画面キャプチャ(調査用) ---
@@ -931,6 +1003,9 @@ window.addEventListener(
   (e) => {
     // タブ名の編集中(input)は、ブラウザ標準のテキスト編集(Ctrl+V等)に任せる
     if (e.target instanceof HTMLInputElement) return;
+    // ここが「人がキーを押した」を拾える最も早い場所。
+    // handleShortcut が stopPropagation() するため、これより内側では拾えない。
+    markUserAction(activeTabId);
     if (!handleShortcut(e)) return;
     e.preventDefault();
     e.stopPropagation();
