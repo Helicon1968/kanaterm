@@ -9,6 +9,37 @@
 <title>kanaterm</title>
 <link rel="stylesheet" href="node_modules/@xterm/xterm/css/xterm.css" />
 <style>
+  /* ①②★※ などの「東アジア曖昧幅」の文字だけ、半角設計のフォントから採る。
+     日本語フォントはこれらを全角で描くが、端末も Claude Code も1セルとして
+     数えるため、そのままだと次の文字に重なってしまう(詳細は presets.js)。
+     Consolas は Windows に標準で入っており、これらを半角で持っている。
+     unicode-range で対象を限定しているので、他の文字には影響しない。
+     Consolas が無い環境では単に無視され、rescaleOverlappingGlyphs 側で処理される。 */
+  @font-face {
+    font-family: "kanaterm-narrow-ambiguous";
+    src: local("Consolas");
+    unicode-range:
+      U+00A1, U+00A4, U+00A7-00A8, U+00AA, U+00AD-00AE, U+00B0-00B4,
+      U+00B6-00BA, U+00BC-00BF, U+00C6, U+00D0, U+00D7-00D8, U+00DE-00E1,
+      U+00E6, U+00E8-00EA, U+00EC-00ED, U+00F0, U+00F2-00F3, U+00F7-00FA,
+      U+00FC, U+00FE, U+2010, U+2013-2016, U+2018-2019, U+201C-201D,
+      U+2020-2022, U+2024-2027, U+2030, U+2032-2033, U+2035, U+203B,
+      U+203E, U+2074, U+207F, U+2081-2084, U+20AC, U+2103, U+2105,
+      U+2109, U+2113, U+2116, U+2121-2122, U+2126, U+212B, U+2153-2154,
+      U+215B-215E, U+2160-216B, U+2170-2179, U+2189, U+2190-2199,
+      U+21B8-21B9, U+21D2, U+21D4, U+21E7, U+2200, U+2202-2203,
+      U+2207-2208, U+220B, U+220F, U+2211, U+2215, U+221A, U+221D-2220,
+      U+2223, U+2225, U+2227-222C, U+222E, U+2234-2237, U+223C-223D,
+      U+2248, U+224C, U+2252, U+2260-2261, U+2264-2267, U+226A-226B,
+      U+226E-226F, U+2282-2283, U+2286-2287, U+2295, U+2299, U+22A5,
+      U+22BF, U+2312, U+2460-24E9, U+24EB-254B, U+2550-2573, U+2580-258F,
+      U+2592-2595, U+25A0-25A1, U+25A3-25A9, U+25B2-25B3, U+25B6-25B7,
+      U+25BC-25BD, U+25C0-25C1, U+25C6-25C8, U+25CB, U+25CE-25D1,
+      U+25E2-25E5, U+25EF, U+2605-2606, U+2609, U+260E-260F, U+2614-2615,
+      U+261C, U+261E, U+2640, U+2642, U+2660-2661, U+2663-2665,
+      U+2667-266A, U+266C-266D, U+266F, U+273D, U+2776-277F;
+  }
+
   /* 配色ごとの色は presets.js が持ち、renderer.js がここへ流し込む。
      初期値はダーク(既定)と同じ値にしてあるので、設定が届く前の一瞬でも
      ちらつかない。実際の値は applySidebarTheme() を参照。 */
@@ -185,6 +216,7 @@
   <script src="node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
   <script src="node_modules/@xterm/addon-serialize/lib/addon-serialize.js"></script>
+  <script src="node_modules/@xterm/addon-webgl/lib/addon-webgl.js"></script>
   <script src="presets.js"></script>
   <script src="renderer.js"></script>
 </body>
