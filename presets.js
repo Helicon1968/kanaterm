@@ -23,6 +23,25 @@ const DEFAULT_SETTINGS = {
 
 const FONT_SIZE_PRESETS = [11, 14, 18, 22];
 
+// --- 端末のフォント ---------------------------------------------------------
+//
+// ①②★※ などは Unicode の「東アジア曖昧幅(Ambiguous)」で、半角にも全角にも
+// なりうる。端末(xterm.js)も Claude Code も 1セルとして数えるが、日本語フォントは
+// 例外なく全角で描くため、1セルの枠に2セル分の絵が入って次の文字に重なる。
+//
+// セル数を2に変えると見た目は整うが、Claude Code(string-width)は1のままなので
+// カーソル位置が1文字ずつずれる。入力中に実害が出るのでその道は採らない。
+//
+// 代わりに「1セルに収まる絵」を用意する。
+//   1. 曖昧幅の文字だけ半角設計のフォント(Consolas)から採る  → index.html の @font-face
+//   2. それでも収まらない字は描画側で横に縮める             → rescaleOverlappingGlyphs
+//
+// NARROW_AMBIGUOUS_FAMILY は index.html の @font-face で定義した名前。
+// 先頭に置くことで、曖昧幅の文字だけがそちらから引かれる(unicode-range で限定)。
+const NARROW_AMBIGUOUS_FAMILY = 'kanaterm-narrow-ambiguous';
+const TERMINAL_FONT_FAMILY =
+  `"${NARROW_AMBIGUOUS_FAMILY}", "UDEV Gothic LG", "BIZ UDGothic", monospace`;
+
 // サイドバーで使う色。タブの色分けと状態の●が、ここから同じ表を引く。
 //
 // 以前はタブ行の背景そのものを色にしていたが、その上に文字を読ませる都合で
@@ -222,6 +241,8 @@ function tabBarColor(color, themeKey) {
 const PRESETS = {
   DEFAULT_SETTINGS,
   FONT_SIZE_PRESETS,
+  TERMINAL_FONT_FAMILY,
+  NARROW_AMBIGUOUS_FAMILY,
   THEME_PRESETS,
   TAB_COLOR_PRESETS,
   UI_COLOR_SETS,

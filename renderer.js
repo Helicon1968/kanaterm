@@ -585,19 +585,53 @@ function saveScrollback(tabId, { sync = false } = {}) {
 
 // --- タブの生成・破棄 ------------------------------------------------------
 
+/**
+ * 描画をWebGLに切り替える。
+ *
+ * rescaleOverlappingGlyphs(はみ出すグリフを縮める)はDOM描画では効かないため、
+ * ①②のような文字を1セルに収めるにはこちらが要る。描画自体も速くなる。
+ *
+ * 画面の設定やドライバの都合でWebGLを使えない環境があるので、失敗しても
+ * 止めずにDOM描画のまま続ける(その場合グリフのはみ出しは直らない)。
+ */
+function attachRenderer(tabId, term) {
+  if (typeof WebglAddon === 'undefined') {
+    logToMain('warn', 'WebGLの描画を読み込めませんでした(DOM描画で続けます)', { tabId });
+    return;
+  }
+  try {
+    const addon = new WebglAddon.WebglAddon();
+    // GPU側の都合で描画コンテキストが失われることがある。
+    // そのまま放置すると画面が固まるので、破棄してDOM描画へ戻す。
+    addon.onContextLoss(() => {
+      logToMain('warn', 'WebGLの描画が失われたためDOM描画へ戻します', { tabId });
+      addon.dispose();
+    });
+    term.loadAddon(addon);
+  } catch (err) {
+    logToMain('warn', 'WebGLを使えないためDOM描画で続けます', { tabId, err: String(err) });
+  }
+}
+
 function createTerminal(tabId, container) {
   const term = new Terminal({
-    fontFamily: '"UDEV Gothic LG", "BIZ UDGothic", monospace',
+    fontFamily: PRESETS.TERMINAL_FONT_FAMILY,
     fontSize: currentSettings.fontSize,
     theme: PRESETS.themeColors(currentSettings.theme),
     cursorBlink: true,
     scrollback: 5000,
+    // 1セルに収まらないグリフを横に縮めて隣へはみ出させない。
+    // ①②などは @font-face 側で半角の字形を当てているので、ここで縮むのは
+    // 半角の字形を持たない字(★※℃など)だけになる。
+    // なおこの指定はDOM描画では効かないため、下の attachRenderer が要る。
+    rescaleOverlappingGlyphs: true,
   });
   const fitAddon = new FitAddon.FitAddon();
   const serializeAddon = new SerializeAddon.SerializeAddon();
   term.loadAddon(fitAddon);
   term.loadAddon(serializeAddon);
   term.open(container);
+  attachRenderer(tabId, term);
 
   term.onData((data) => {
     window.ptyApi.write(tabId, data);
@@ -650,6 +684,23 @@ function createTerminal(tabId, container) {
     }
     return true;
   });
+
+  // 右クリックのメニューは、xterm より先に(capture)受け取って止める。
+  //
+  // xterm.js は右クリックされると、隠しテキストエリアをマウス位置へ移動し、
+  // そこへ選択中の文字列を入れて全選択する。ブラウザ標準のコンテキストメニューで
+  // 「コピー」を効かせるための下準備だが、kanaterm は自前のメニューを出すので
+  // 不要なうえ、端末の上に「選択済みの文字が入った入力欄」が居座ることになる。
+  // 貼り付けが二重に走る事故のもとなので、そもそも届かせない。
+  container.addEventListener(
+    'contextmenu',
+    (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      window.ptyApi.showContextMenu(tabId);
+    },
+    true
+  );
 
   const stopImeAnchor = attachImeAnchor(tabId, term, container);
 
