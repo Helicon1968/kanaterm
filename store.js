@@ -20,14 +20,13 @@ function defaultCwd() {
 const NULL_LOG = { error: () => {}, warn: () => {}, info: () => {}, debug: () => {} };
 
 /**
- * userDataDir 配下に state.json と scrollback/ を持つストアを作る。
+ * userDataDir 配下に state.json を持つストアを作る。
  * app.getPath('userData') に依存させないことで、単体でも動かせるようにしている。
  */
 function createStore(userDataDir, log = NULL_LOG) {
   const stateFile = path.join(userDataDir, 'state.json');
+  // 以前の版が画面内容を保存していた場所(今は削除するためだけに参照する)
   const scrollbackDir = path.join(userDataDir, 'scrollback');
-
-  const scrollbackPath = (tabId) => path.join(scrollbackDir, `${tabId}.txt`);
 
   /** 前回終了時の状態。壊れていた場合・初回起動時は既定値を返す。 */
   function loadState() {
@@ -90,72 +89,27 @@ function createStore(userDataDir, log = NULL_LOG) {
     }
   }
 
-  function readScrollback(tabId) {
-    try {
-      return fs.readFileSync(scrollbackPath(tabId), 'utf8');
-    } catch (err) {
-      // 新規タブには当然ファイルが無いので、それは黙って空を返す。
-      // 一方で権限やパスの問題で読めない場合は「前回の内容が出ない」原因に
-      // なるため、区別して記録する(社内PCなど %APPDATA% が別の場所へ
-      // 向けられている環境で実際に起こりうる)。
-      if (err.code !== 'ENOENT') {
-        log.warn('画面内容を読み込めませんでした', { tabId, err: String(err) });
-      }
-      return '';
-    }
-  }
-
-  function writeScrollback(tabId, content) {
-    try {
-      fs.mkdirSync(scrollbackDir, { recursive: true });
-      fs.writeFileSync(scrollbackPath(tabId), content, 'utf8');
-    } catch (err) {
-      log.error('画面内容の保存に失敗しました', { tabId, err: String(err) });
-    }
-  }
-
-  function deleteScrollback(tabId) {
-    try {
-      fs.unlinkSync(scrollbackPath(tabId));
-    } catch (_err) {
-      // 元々無い場合もあるので無視してよい
-    }
-  }
-
   /**
-   * state.json に載っていないタブのスクロールバックを消す。
-   * 異常終了などで取り残されたファイルが延々と溜まるのを防ぐため、起動時に一度だけ呼ぶ。
+   * 以前の版が保存していた画面内容(scrollback/)を消す。
+   * 画面内容の保存は廃止したが、端末の出力そのもの(パスワード等を含みうる)なので
+   * 不要になった分を残しておかない。起動時に一度だけ呼ぶ。
    */
-  function pruneScrollback(validTabIds) {
-    const keep = new Set(validTabIds);
-    let files;
+  function removeLegacyScrollback() {
+    if (!fs.existsSync(scrollbackDir)) return false;
     try {
-      files = fs.readdirSync(scrollbackDir);
-    } catch (_err) {
-      return; // ディレクトリがまだ無い(初回起動)
+      fs.rmSync(scrollbackDir, { recursive: true, force: true });
+      log.info('以前の版が保存した画面内容を削除しました', { path: scrollbackDir });
+      return true;
+    } catch (err) {
+      log.warn('以前の版が保存した画面内容を削除できませんでした', { err: String(err) });
+      return false;
     }
-    let removed = 0;
-    for (const file of files) {
-      if (!file.endsWith('.txt')) continue;
-      if (keep.has(path.basename(file, '.txt'))) continue;
-      try {
-        fs.unlinkSync(path.join(scrollbackDir, file));
-        removed += 1;
-      } catch (_err) {
-        // 消せなくても実害はない
-      }
-    }
-    if (removed > 0) log.debug('孤立した画面内容を削除しました', { 件数: removed });
-    return removed;
   }
 
   return {
     loadState,
     saveState,
-    readScrollback,
-    writeScrollback,
-    deleteScrollback,
-    pruneScrollback,
+    removeLegacyScrollback,
   };
 }
 

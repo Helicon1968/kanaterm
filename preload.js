@@ -34,11 +34,6 @@ contextBridge.exposeInMainWorld('ptyApi', {
   setTabTitle: (tabId, title) => ipcRenderer.send('tab:title', { tabId, title }),
   reorderTabs: (order) => ipcRenderer.send('tab:reorder', { order }),
 
-  saveScrollback: (tabId, content) => ipcRenderer.send('tab:scrollback', { tabId, content }),
-  // 終了直前だけは同期で送る。非同期だとウィンドウ破棄に間に合わず取りこぼすため。
-  saveScrollbackSync: (tabId, content) =>
-    ipcRenderer.sendSync('tab:scrollback-sync', { tabId, content }),
-
   reportError: (kind, detail) => ipcRenderer.send('log:renderer-error', { kind, detail }),
   // レンダラー側の出来事をmainのログファイルへ回す。
   // 別環境の不具合は DevTools を開いてもらえないことがあるため、

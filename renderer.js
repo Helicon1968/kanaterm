@@ -49,33 +49,8 @@ let activeTabId = null;
 // フォント・配色は「このPCの設定」。main側の settings:init / settings:apply で同期する。
 let currentSettings = { ...PRESETS.DEFAULT_SETTINGS };
 
-// 画面内容を定期的に保存しておく(終了時に少し古い状態しか復元できない、
-// という取りこぼしを減らすため)
-const SCROLLBACK_SAVE_INTERVAL_MS = 10000;
-
-// 前回終了時の画面内容を、いつ書き戻すか。
-//
-// シェル起動時の初期描画(リサイズへの応答含む)が何度か届くため、書き終わる前に
-// 書き戻すと、そのあとの再描画で消えてしまう。きっかけは2つ用意する。
-//
-//   1. シェル統合が出す OSC 7。これは「プロンプトを描き終えた」という確定的な
-//      合図なので、待ち時間の当てずっぽうが要らない。通常はこちらで決まる。
-//   2. 出力が一定時間途切れたら書き戻す(保険)。実行ポリシー等でシェル統合の
-//      スクリプトが読み込めない環境では OSC 7 が来ないため、1だけにはできない。
-//
-// どちらの経路でも「一度書いたら終わり」にはしない。フォントサイズ変更などで
-// 実際のリサイズが起きるとシェル側の再描画で消えてしまうため、ユーザーが自分で
-// 何か入力するまでは、再描画のたびに何度でも書き戻す。
-const RESTORE_QUIET_MS = 200;
-
 // 複数行の貼り付け確認ダイアログに載せる最大行数
 const PASTE_PREVIEW_LINES = 10;
-
-// 「人が操作した」とみなす有効期間。
-// キー・貼り付け・IMEの直後に端末から出ていくデータだけを利用者の入力と数える。
-// 端末は利用者の入力以外でも応答を返すため(下の markUserAction を参照)、
-// これが無いと起動直後の問い合わせを入力と誤認してしまう。
-const USER_ACTION_WINDOW_MS = 500;
 
 // 制御文字はソースに直接書くと読めないので、コード値から作る。
 const ESC = String.fromCharCode(27); // 0x1b
@@ -351,120 +326,13 @@ function fitActive() {
   t.fitAddon.fit();
   // サイズが実際に変わった時だけリサイズを送る。
   // 変わっていないのに毎回送ると、シェル側がそのたびに画面を再描画し、
-  // 復元した内容やタブを見るだけで表示が消えてしまう原因になっていた。
+  // タブを見るだけで表示が消えてしまう原因になっていた。
   const { cols, rows } = t.term;
   if (t.lastSentCols !== cols || t.lastSentRows !== rows) {
     t.lastSentCols = cols;
     t.lastSentRows = rows;
     window.ptyApi.resize(activeTabId, cols, rows);
   }
-}
-
-// --- 復元内容(スクロールバック) --------------------------------------------
-
-// pendingScrollback をあえて消さない(=使い捨てにしない)理由は
-// RESTORE_QUIET_MS のコメントを参照。ユーザーが実際に入力した時点で
-// clearRestoreGuard() により保護を解除する。
-
-/**
- * 「今、人が操作した」印をつける。
- *
- * 端末は利用者の入力以外でもシェルへデータを送り返す。カーソル位置や端末種別の
- * 問い合わせ(DSR/DA)、背景色の問い合わせ(OSC 11)、フォーカス通知(1004)などが
- * それで、xterm.js はこれらの答えを入力と同じ経路(onData)で送り出す。
- *
- * これを「利用者が入力した」と数えてしまうと、起動直後にシェルやプロンプトが
- * 端末へ問い合わせただけで復元が取りやめになる。実際、会社の環境で8タブすべてが
- * これに当たり、一度も書き戻されないままになっていた。
- *
- * そこでキー・貼り付け・IMEという人の操作を直接拾い、その直後に出ていった
- * データだけを入力とみなす。
- */
-function markUserAction(tabId) {
-  const t = tabs.get(tabId);
-  if (t) t.userActionAt = Date.now();
-}
-
-function isUserInput(tabId) {
-  const t = tabs.get(tabId);
-  return Boolean(t && t.userActionAt && Date.now() - t.userActionAt < USER_ACTION_WINDOW_MS);
-}
-
-/**
- * 端末が返した自動応答の種類を見分ける(記録用)。
- * 中身そのものは残さず、種類と長さだけを記録する。
- */
-function classifyAutoReply(data) {
-  if (data === ESC + '[I' || data === ESC + '[O') return 'フォーカス通知';
-  if (/^\u001b\[\d+;\d+R$/.test(data)) return 'カーソル位置(DSR)';
-  if (/^\u001b\[\??[\d;>]*c$/.test(data)) return '端末種別(DA)';
-  if (/^\u001b\[\d*n$/.test(data)) return '状態(DSR)';
-  if (data.startsWith(ESC + ']')) return '色などの問い合わせへの応答(OSC)';
-  if (data.startsWith(ESC)) return 'その他の制御応答';
-  return 'その他';
-}
-
-/** 前回終了時の画面内容を実際に書き戻す */
-function restoreScrollback(tabId, きっかけ) {
-  const t = tabs.get(tabId);
-  if (!t || !t.pendingScrollback) return;
-  clearTimeout(t.restoreTimer);
-  t.restoreTimer = null;
-
-  // 複数回書き戻す可能性があるため、そのたびに一度リセットしてから書く。
-  // クリアせずに書き戻すと、前回分の末尾に継ぎ足されて内容が重複してしまう。
-  t.restoring = true;
-  t.term.reset();
-  t.term.write(t.pendingScrollback, () => {
-    const t2 = tabs.get(tabId);
-    if (t2) t2.restoring = false;
-  });
-
-  t.restoreCount += 1;
-  // 内容そのものは記録しない(パスワードが混じりうるため)。
-  // 「どのきっかけで・どれだけの量を・どの桁数で書いたか」だけ残す。
-  // 復元されない環境の原因を、ログだけで切り分けられるようにするため。
-  const 詳細 = {
-    tabId,
-    きっかけ,
-    文字数: t.pendingScrollback.length,
-    cols: t.term.cols,
-    rows: t.term.rows,
-  };
-  if (t.restoreCount === 1) {
-    logToMain('info', '前回の画面内容を書き戻しました', 詳細);
-  } else {
-    // 2回目以降は再描画に追随しているだけなので、調査時だけ見えれば足りる
-    logToMain('debug', '前回の画面内容を書き戻しました(再描画への追随)', {
-      ...詳細,
-      回数: t.restoreCount,
-    });
-  }
-}
-
-/** 保険の経路。出力が一定時間途切れたら書き戻す */
-function scheduleScrollbackRestore(tabId) {
-  const t = tabs.get(tabId);
-  if (!t || !t.pendingScrollback) return;
-  clearTimeout(t.restoreTimer);
-  t.restoreTimer = setTimeout(() => restoreScrollback(tabId, '出力が途切れた'), RESTORE_QUIET_MS);
-}
-
-function clearRestoreGuard(tabId) {
-  const t = tabs.get(tabId);
-  if (!t) return;
-  if (t.pendingScrollback && t.restoreCount === 0) {
-    // 書き戻す前に打たれた場合。以後このタブは復元されないので、
-    // 「出なかった」という相談を受けた時に分かるよう残しておく。
-    logToMain('info', '書き戻す前に入力があったため復元を取りやめました', {
-      tabId,
-      文字数: t.pendingScrollback.length,
-    });
-  }
-  t.pendingScrollback = null;
-  t.restoreOnPrompt = false;
-  clearTimeout(t.restoreTimer);
-  t.restoreTimer = null;
 }
 
 /**
@@ -489,7 +357,7 @@ function pastePreview(lines) {
  * クリップボードの内容をそのタブへ貼り付ける。
  * term.paste() が「CRLF -> CR の正規化」と「ブラケットペースト(\x1b[200~ 〜 \x1b[201~)の
  * 付与」を端末の状態に応じて行う。結果は通常の入力と同じく onData を通るので、
- * PTYへの送信も復元ガードの解除も既存の経路にそのまま乗る。
+ * PTYへの送信も既存の経路にそのまま乗る。
  */
 async function pasteFromClipboard(tabId) {
   const t = tabs.get(tabId);
@@ -503,8 +371,6 @@ async function pasteFromClipboard(tabId) {
     if (!ok) return;
   }
 
-  // 右クリックメニュー経由だとDOMのpasteイベントを伴わないため、明示的に印をつける
-  markUserAction(tabId);
   t.term.paste(text);
   // 確認ダイアログや右クリックメニューでフォーカスが外れているので戻す
   t.term.focus();
@@ -566,23 +432,6 @@ function scheduleScreenCapture(tabId) {
   }, CAPTURE_QUIET_MS);
 }
 
-function saveScrollback(tabId, { sync = false } = {}) {
-  const t = tabs.get(tabId);
-  // 内容が変わっていないタブまで毎回シリアライズすると、タブ数に比例して無駄に重くなる
-  if (!t || !t.dirty) return;
-  try {
-    const content = t.serializeAddon.serialize();
-    if (sync) {
-      window.ptyApi.saveScrollbackSync(tabId, content);
-    } else {
-      window.ptyApi.saveScrollback(tabId, content);
-    }
-    t.dirty = false;
-  } catch (_err) {
-    // シリアライズに失敗しても致命的ではないので無視する
-  }
-}
-
 // --- タブの生成・破棄 ------------------------------------------------------
 
 /**
@@ -627,54 +476,16 @@ function createTerminal(tabId, container) {
     rescaleOverlappingGlyphs: true,
   });
   const fitAddon = new FitAddon.FitAddon();
-  const serializeAddon = new SerializeAddon.SerializeAddon();
   term.loadAddon(fitAddon);
-  term.loadAddon(serializeAddon);
   term.open(container);
   attachRenderer(tabId, term);
 
-  term.onData((data) => {
-    window.ptyApi.write(tabId, data);
-    // ユーザーが実際に入力した時点で、復元内容を守る必要はなくなる
-    // (以後の再描画は通常の操作によるものなので、そのまま任せてよい)。
-    // ここに来るデータには端末からの自動応答も混じるため、人の操作が
-    // 直前にあった時だけ解除する。
-    if (isUserInput(tabId)) {
-      clearRestoreGuard(tabId);
-      return;
-    }
-    // 復元を待っている間だけ、自動応答が来たことを残す。
-    // 「復元されない」相談を受けた時に、どの問い合わせが飛んでいるかを
-    // 中身を残さずに確かめられるようにするため。
-    const t = tabs.get(tabId);
-    if (t && t.pendingScrollback) {
-      logToMain('debug', '端末が自動応答を返しました(入力ではないので復元は維持)', {
-        tabId,
-        種類: classifyAutoReply(data),
-        文字数: data.length,
-      });
-    }
-  });
-
-  // 人の操作を xterm より先に拾う(capture)。ここで印をつけておき、
-  // 直後に onData へ流れたデータを「利用者の入力」と判断する。
-  // キーだけは window 側で拾う(下の keydown を参照)。ショートカットの処理で
-  // stopPropagation() するため、ここに付けても届かないことがあるため。
-  for (const type of ['paste', 'compositionstart', 'compositionend']) {
-    container.addEventListener(type, () => markUserAction(tabId), true);
-  }
+  term.onData((data) => window.ptyApi.write(tabId, data));
 
   // シェル統合スクリプトが送るOSC7から解析されたcwdを受け取る
   term.parser.registerOscHandler(7, (data) => {
     const t0 = tabs.get(tabId);
-    if (t0) {
-      t0.lastPromptAt = Date.now();
-      // OSC 7 が届いた = シェルがプロンプトを描き終えた、という確定的な合図。
-      // ここが前回の画面内容を書き戻すのに一番安全な瞬間になる。
-      // ただし今はまさに解析の最中なので、ここで reset() すると壊れる。
-      // 目印だけ立てて、この塊を解析し終えてから書き戻す(onDataのcallback)。
-      if (t0.pendingScrollback && !t0.restoring) t0.restoreOnPrompt = true;
-    }
+    if (t0) t0.lastPromptAt = Date.now();
     const cwdPath = fileUriToWindowsPath(data);
     if (cwdPath) {
       const t = tabs.get(tabId);
@@ -704,7 +515,7 @@ function createTerminal(tabId, container) {
 
   const stopImeAnchor = attachImeAnchor(tabId, term, container);
 
-  return { term, fitAddon, serializeAddon, stopImeAnchor };
+  return { term, fitAddon, stopImeAnchor };
 }
 
 function createTabRow(tabId, cwd, color, title) {
@@ -778,14 +589,14 @@ function attachDragHandlers(tabEl, tabId) {
   });
 }
 
-function createTabUI(tabId, cwd, scrollback, color, title) {
+function createTabUI(tabId, cwd, color, title) {
   if (tabs.has(tabId)) return; // 二重生成の保険
 
   const container = document.createElement('div');
   container.className = 'pane';
   panes.appendChild(container);
 
-  const { term, fitAddon, serializeAddon, stopImeAnchor } = createTerminal(tabId, container);
+  const { term, fitAddon, stopImeAnchor } = createTerminal(tabId, container);
 
   // ドラッグで選択した瞬間に自動でクリップボードへコピーする。
   // 右クリック(メニュー表示)でここに入ると選択が意図せず上書きされるので左ボタンのみ。
@@ -799,27 +610,12 @@ function createTabUI(tabId, cwd, scrollback, color, title) {
   tabs.set(tabId, {
     term,
     fitAddon,
-    serializeAddon,
     container,
     tabEl,
     label,
     cwd,
     color: color || null,
     title: title || null,
-    // 前回終了時に保存された画面内容(まだ書き込んでいない分)。
-    // 実行していたプロセスそのものは再現できず、あくまで見た目のスナップショット。
-    pendingScrollback: scrollback || null,
-    restoreTimer: null,
-    // OSC 7(プロンプト描画)を見つけた。この塊の解析が終わり次第書き戻す
-    restoreOnPrompt: false,
-    // 書き戻しの最中か(書き戻した内容で再度きっかけを立てないための目印)
-    restoring: false,
-    // 何回書き戻したか(1回目だけINFO、以降はDEBUGで記録する)
-    restoreCount: 0,
-    // 最後に人が操作した時刻(キー・貼り付け・IME)。端末からの自動応答と区別する
-    userActionAt: 0,
-    // 前回の保存以降に画面が変化したか(定期保存の対象を絞るため)
-    dirty: false,
     // --- 画面キャプチャ(調査用) ---
     captureTimer: null,
     lastCapture: null,
@@ -845,7 +641,6 @@ function destroyTabUI(tabId) {
   const t = tabs.get(tabId);
   if (!t) return;
   // 破棄したTerminalに書き込むと例外になるため、各種タイマーを先に止める
-  clearTimeout(t.restoreTimer);
   clearTimeout(t.captureTimer);
   t.stopImeAnchor();
   t.term.dispose();
@@ -859,7 +654,7 @@ function requestCloseTab(tabId) {
 
   if (tabs.size <= 1) {
     // 最後の1枚は「タブを閉じる」のではなくウィンドウごと閉じる。
-    // これにより記録(state.json)はそのまま残り、次回起動時に復元される。
+    // これにより記録(state.json)はそのまま残り、次回起動時にタブ構成が復元される。
     window.close();
     return;
   }
@@ -916,8 +711,8 @@ function startRenameTab(tabId) {
 
 // --- メインプロセスからのイベント -------------------------------------------
 
-window.ptyApi.onTabCreate(({ id, cwd, scrollback, color, title }) => {
-  createTabUI(id, cwd, scrollback, color, title);
+window.ptyApi.onTabCreate(({ id, cwd, color, title }) => {
+  createTabUI(id, cwd, color, title);
 });
 
 window.ptyApi.onTabActivate(({ tabId }) => {
@@ -937,17 +732,8 @@ window.ptyApi.onRequestPaste(({ tabId }) => pasteFromClipboard(tabId));
 window.ptyApi.onData(({ tabId, data }) => {
   const t = tabs.get(tabId);
   if (!t) return;
-  // 書き込みは内部で順番待ちになるため、解析し終えた時に呼ばれる第2引数を使う。
-  // OSC 7 を見つけていたらここで書き戻す(解析の途中でresetすると画面が壊れる)。
-  t.term.write(data, () => {
-    const t2 = tabs.get(tabId);
-    if (!t2 || !t2.restoreOnPrompt) return;
-    t2.restoreOnPrompt = false;
-    restoreScrollback(tabId, 'プロンプト(OSC 7)');
-  });
-  t.dirty = true;
+  t.term.write(data);
   t.lastOutputAt = Date.now();
-  if (t.pendingScrollback) scheduleScrollbackRestore(tabId);
   if (currentSettings.captureScreen === true) scheduleScreenCapture(tabId);
 });
 
@@ -959,7 +745,6 @@ window.ptyApi.onExit(({ tabId, code }) => {
   t.exited = true;
   t.tabEl.classList.add('exited');
   t.term.write(`\r\n\r\n[プロセス終了: code=${code}]\r\n`);
-  t.dirty = true;
 });
 
 window.ptyApi.onSettingsInit((settings) => {
@@ -1016,7 +801,7 @@ function handleShortcut(e) {
   //   それ以外    -> CR
   // となるため、Shift+Enter が送信になってしまう。ここで ESC+CR に振り替える。
   // term.input() を使うのは、通常の入力と同じく onData を通すため
-  // (PTYへの送信と復元内容の保護解除が既存の経路に乗る)。
+  // (PTYへの送信が既存の経路に乗る)。
   if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
     const t = tabs.get(activeTabId);
     if (t) t.term.input(ESC + CR);
@@ -1054,9 +839,6 @@ window.addEventListener(
   (e) => {
     // タブ名の編集中(input)は、ブラウザ標準のテキスト編集(Ctrl+V等)に任せる
     if (e.target instanceof HTMLInputElement) return;
-    // ここが「人がキーを押した」を拾える最も早い場所。
-    // handleShortcut が stopPropagation() するため、これより内側では拾えない。
-    markUserAction(activeTabId);
     if (!handleShortcut(e)) return;
     e.preventDefault();
     e.stopPropagation();
@@ -1083,14 +865,4 @@ window.addEventListener('contextmenu', (e) => {
   if (activeTabId) window.ptyApi.showContextMenu(activeTabId);
 });
 
-setInterval(() => {
-  for (const tabId of tabs.keys()) saveScrollback(tabId);
-}, SCROLLBACK_SAVE_INTERVAL_MS);
-
 setInterval(tickTabStatuses, STATUS_TICK_MS);
-
-// ウィンドウが閉じる直前に最後の画面内容を確定させる。
-// 非同期の送信だとウィンドウ破棄に間に合わないことがあるため、ここだけ同期で送る。
-window.addEventListener('beforeunload', () => {
-  for (const tabId of tabs.keys()) saveScrollback(tabId, { sync: true });
-});
