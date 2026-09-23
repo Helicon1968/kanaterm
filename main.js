@@ -189,22 +189,15 @@ function main() {
     tabOrder.push(tabId);
     scheduleSave();
 
-    // 既存の(前回セッションで保存された)画面内容があれば一緒に渡す。
-    // 新規タブの場合は該当ファイルが無いので空文字になる。
-    // 「復元されない」という相談を受けた時に、渡すものが有ったのかどうかを
-    // まずここで切り分けられるよう、文字数を残しておく(内容は残さない)。
-    const scrollback = store.readScrollback(tabId);
     log.info('タブを作成しました', {
       tabId,
       cwd: resolvedCwd,
       起動: Boolean(ptyProcess),
-      復元文字数: scrollback.length,
     });
 
     send('tab:create', {
       id: tabId,
       cwd: resolvedCwd,
-      scrollback,
       color,
       title,
     });
@@ -225,7 +218,6 @@ function main() {
     if (t.ptyProcess) t.ptyProcess.kill();
     tabs.delete(tabId);
     tabOrder = tabOrder.filter((id) => id !== tabId);
-    store.deleteScrollback(tabId); // 手放したタブの画面内容は残さない
     if (activeTabId === tabId) activeTabId = tabOrder[0] || null;
     scheduleSave();
     log.info('タブを閉じました', { tabId, 残り: tabs.size });
@@ -383,7 +375,6 @@ function main() {
           send('tab:create', {
             id,
             cwd: t.cwd,
-            scrollback: store.readScrollback(id),
             color: t.color,
             title: t.title,
           });
@@ -503,18 +494,6 @@ function main() {
     for (const id of tabOrder) if (!valid.includes(id)) valid.push(id); // 抜けがあれば末尾へ
     tabOrder = valid;
     scheduleSave();
-  });
-
-  // 定期保存でレンダラーから送られてくる画面内容
-  ipcMain.on('tab:scrollback', (_event, { tabId, content }) => {
-    if (tabs.has(tabId)) store.writeScrollback(tabId, content);
-  });
-
-  // 終了直前の保存。非同期の send だとウィンドウ破棄に間に合わず取りこぼすため、
-  // このときだけ同期IPCを使って「書き終わってから閉じる」ことを保証する。
-  ipcMain.on('tab:scrollback-sync', (event, { tabId, content }) => {
-    if (tabs.has(tabId)) store.writeScrollback(tabId, content);
-    event.returnValue = true;
   });
 
   // タブごとのClaude Codeの状態。●の表示はレンダラーが持ち、
@@ -659,8 +638,8 @@ function main() {
     const 削除数 = logger.pruneOldLogs();
     if (削除数 > 0) log.debug('古いログを削除しました', { 件数: 削除数 });
 
-    // 異常終了などで取り残されたスクロールバックをここで一掃しておく
-    store.pruneScrollback(initial.tabs.map((t) => t.id));
+    // 画面内容の保存は廃止した。以前の版が残した分(端末の出力そのもの)を消しておく
+    store.removeLegacyScrollback();
     createMainWindow(initial);
 
     app.on('activate', () => {
