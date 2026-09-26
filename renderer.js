@@ -600,9 +600,18 @@ function createTabUI(tabId, cwd, color, title) {
 
   // ドラッグで選択した瞬間に自動でクリップボードへコピーする。
   // 右クリック(メニュー表示)でここに入ると選択が意図せず上書きされるので左ボタンのみ。
-  container.addEventListener('mouseup', (e) => {
+  //
+  // 離す場所は端末の上とは限らない。行末から行頭へ選ぶと左隣のサイドバーへ
+  // はみ出しやすく、ウィンドウの外で離すこともある。端末(container)で mouseup を
+  // 待つとそれらを取りこぼすため、端末で押された時だけ window 側で離すのを待つ。
+  container.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
-    if (term.hasSelection()) window.ptyApi.copyText(term.getSelection());
+    const onUp = (up) => {
+      if (up.button !== 0) return;
+      window.removeEventListener('mouseup', onUp);
+      if (term.hasSelection()) window.ptyApi.copyText(term.getSelection());
+    };
+    window.addEventListener('mouseup', onUp);
   });
 
   const { tabEl, label, dot } = createTabRow(tabId, cwd, color, title);
