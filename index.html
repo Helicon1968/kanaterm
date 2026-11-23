@@ -65,6 +65,10 @@
     height: 100%;
     background: var(--term-bg);
     overflow: hidden;
+    /* hidden は利用者がスクロールできないだけで、ブラウザが「入力中の文字を
+       見せる」ために自分でスクロールすることはある。そうなるとサイドバーごと
+       左へずれたまま戻せなくなるので、clip でスクロールそのものを禁じる。 */
+    overflow: clip;
   }
   body {
     display: flex;
@@ -190,7 +194,10 @@
   #panes {
     position: relative;
     flex: 1;
+    min-width: 0;
     height: 100vh;
+    /* 端末の中身(変換中の textarea など)がはみ出しても、ページへ広げない */
+    overflow: clip;
   }
   .pane {
     position: absolute;

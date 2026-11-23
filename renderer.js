@@ -103,31 +103,51 @@ const STATUS_HOLD = { waiting: 2, busy: 2, idle: 2, none: 4 };
  * 直したい場面で動かないので、位置が変えられた瞬間に反応する MutationObserver
  * にしている。こちらは描画の負荷に関係なく確実に呼ばれる。
  */
+//
+// もう一つ、変換中の textarea を端末の右端からはみ出させない。xterm は textarea を
+// カーソル位置に置き、幅を変換中の文字列に合わせて広げる。カーソルが右端付近に
+// あると textarea が画面の外まで伸び、変換候補が右端に張り付くうえ、ページ全体が
+// はみ出しを抱えることになる(サイドバーが左へ押し出される原因になりうる)。
 function attachImeAnchor(tabId, term, container) {
   const textarea = container.querySelector('textarea');
   const screen = container.querySelector('.xterm-screen');
+  // 変換中の文字列を描く要素。xterm は textarea と同じ位置に置く
+  const compositionView = container.querySelector('.composition-view');
   if (!textarea || !screen) return () => {};
 
   let composing = false;
-  let applying = false; // 自分の書き換えで再入しないようにする
 
-  const apply = () => {
-    if (applying) return;
-    const t = tabs.get(tabId);
-    if (!t || !t.imeAnchor) return;
-    // 出力が止まっていれば端末のカーソル＝入力位置なので、xterm に任せる
-    if (Date.now() - t.lastOutputAt >= STATUS_BUSY_QUIET_MS) return;
-
-    const left = `${Math.round((t.imeAnchor.x * screen.clientWidth) / term.cols)}px`;
-    const top = `${Math.round((t.imeAnchor.y * screen.clientHeight) / term.rows)}px`;
-    if (textarea.style.left === left && textarea.style.top === top) return;
-
-    applying = true;
-    textarea.style.left = left;
-    textarea.style.top = top;
-    applying = false;
+  const place = (el, left, top) => {
+    if (!el || (el.style.left === left && el.style.top === top)) return;
+    el.style.left = left;
+    el.style.top = top;
   };
 
+  const apply = () => {
+    const t = tabs.get(tabId);
+    if (!t) return;
+
+    let x = parseFloat(textarea.style.left) || 0;
+    let y = parseFloat(textarea.style.top) || 0;
+    // 出力が止まっていれば端末のカーソル＝入力位置なので、xterm の位置のままでよい。
+    // 出力中だけ、控えておいた入力位置へ寄せる。
+    const moving = t.imeAnchor && Date.now() - t.lastOutputAt < STATUS_BUSY_QUIET_MS;
+    if (moving) {
+      x = (t.imeAnchor.x * screen.clientWidth) / term.cols;
+      y = (t.imeAnchor.y * screen.clientHeight) / term.rows;
+    }
+    // 右端からはみ出す分だけ左へ戻す
+    x = Math.max(0, Math.min(x, screen.clientWidth - textarea.offsetWidth));
+
+    const left = `${Math.round(x)}px`;
+    const top = `${Math.round(y)}px`;
+    place(textarea, left, top);
+    // 変換中の文字列も同じ場所に描かせる。出力中の行に混ざったり、
+    // 右端で画面の外へ切れたりしないように。
+    place(compositionView, left, top);
+  };
+
+  // 自分の書き換えでも呼ばれるが、位置が同じなら何もしないので往復はしない
   const observer = new MutationObserver(() => {
     if (composing) apply();
   });
@@ -140,6 +160,9 @@ function attachImeAnchor(tabId, term, container) {
   textarea.addEventListener('compositionstart', () => {
     composing = true;
     observer.observe(textarea, { attributes: true, attributeFilter: ['style'] });
+    if (compositionView) {
+      observer.observe(compositionView, { attributes: true, attributeFilter: ['style'] });
+    }
     apply();
   });
   textarea.addEventListener('compositionend', stop);
@@ -187,7 +210,9 @@ function tickTabStatuses() {
     }
     // 出力が止まっている時のカーソル位置＝利用者から見た入力位置。
     // 変換候補をここへ寄せるために控えておく(詳細は attachImeAnchor)。
-    if (Date.now() - t.lastOutputAt >= STATUS_BUSY_QUIET_MS) {
+    // ただしカーソルを隠している間の位置は入力位置ではない。Claude Code は
+    // 確認画面や作業中の描画の合間、隠したカーソルを右端に置いている。
+    if (!t.cursorHidden && Date.now() - t.lastOutputAt >= STATUS_BUSY_QUIET_MS) {
       const buf = t.term.buffer.active;
       t.imeAnchor = { x: buf.cursorX, y: buf.cursorY };
     }
@@ -513,6 +538,37 @@ function createTerminal(tabId, container) {
     true
   );
 
+  // 右ボタンの押下・解放も xterm へ届かせない。
+  //
+  // Claude Code はマウス操作を自分で受け取るモード(マウストラッキング)で動くので、
+  // xterm は右ボタンの押下をそのままアプリへ送る(ESC[<2;x;yM)。Claude Code は
+  // それを「選択があればコピー、無ければ貼り付け」と解釈するため、kanaterm の
+  // メニューを出しただけで、裏で貼り付けまで走っていた。右クリックは kanaterm の
+  // メニューに一本化し、アプリへは送らない(contextmenu は別のイベントなので出る)。
+  for (const type of ['mousedown', 'mouseup']) {
+    container.addEventListener(
+      type,
+      (e) => {
+        if (e.button === 2) e.stopPropagation();
+      },
+      true
+    );
+  }
+
+  // カーソルの表示/非表示(DECTCEM: ESC[?25h / ESC[?25l)を控えておく。
+  // Claude Code はカーソルを隠している間、右端に置いている。その位置を
+  // 入力位置と取り違えないために使う(attachImeAnchor を参照)。
+  // false を返して、xterm 本来の処理はそのまま行わせる。
+  for (const [final, hidden] of [['h', false], ['l', true]]) {
+    term.parser.registerCsiHandler({ prefix: '?', final }, (params) => {
+      if (params.includes(25)) {
+        const t = tabs.get(tabId);
+        if (t) t.cursorHidden = hidden;
+      }
+      return false;
+    });
+  }
+
   const stopImeAnchor = attachImeAnchor(tabId, term, container);
 
   return { term, fitAddon, stopImeAnchor };
@@ -638,6 +694,8 @@ function createTabUI(tabId, cwd, color, title) {
     lastOutputAt: 0,       // 最後に出力が届いた時刻（画面が動いているかの判断に使う）
     // 出力が落ち着いている時のカーソル位置（変換候補をここへ寄せる）
     imeAnchor: null,
+    // アプリがカーソルを隠しているか(隠している間の位置は入力位置として使わない)
+    cursorHidden: false,
     stopImeAnchor,
   });
 
