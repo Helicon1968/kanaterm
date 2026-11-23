@@ -14,3 +14,6 @@ npm-debug.log*
 .idea/
 Thumbs.db
 .DS_Store
+
+# 不具合の調査用に利用者が撮った画像・動画(大きく、公開リポジトリに載せないため追跡しない)
+Reference/
