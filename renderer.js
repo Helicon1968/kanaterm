@@ -157,16 +157,65 @@ function attachImeAnchor(tabId, term, container) {
     observer.disconnect();
   };
 
+  // 1回の変換につき、最初の入力時と確定時に位置を記録する(詳細ログ有効時のみ)
+  let loggedUpdate = false;
+
   textarea.addEventListener('compositionstart', () => {
     composing = true;
+    loggedUpdate = false;
     observer.observe(textarea, { attributes: true, attributeFilter: ['style'] });
     if (compositionView) {
       observer.observe(compositionView, { attributes: true, attributeFilter: ['style'] });
     }
     apply();
   });
-  textarea.addEventListener('compositionend', stop);
+  textarea.addEventListener('compositionupdate', () => {
+    if (loggedUpdate) return;
+    loggedUpdate = true;
+    // xterm が位置と幅を決め終えてから測る
+    requestAnimationFrame(() => logImeDiag(tabId, term, container, '変換開始'));
+  });
+  textarea.addEventListener('compositionend', () => {
+    logImeDiag(tabId, term, container, '確定');
+    stop();
+  });
   return stop;
+}
+
+/**
+ * 変換候補の位置を調べるための記録(詳細ログ有効時のみ main 側で残る)。
+ * 候補ウィンドウ自体は OS(IME)が描くので、こちらから位置は測れない。
+ * IME が位置の手がかりにする textarea と、その周辺の座標・倍率を残す。
+ * 【重要】変換中の文字そのものは残さない(文字数だけ)。
+ */
+function logImeDiag(tabId, term, container, phase) {
+  const t = tabs.get(tabId);
+  if (!t) return;
+  const rect = (el) => {
+    if (!el) return null;
+    const b = el.getBoundingClientRect();
+    return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)];
+  };
+  const textarea = container.querySelector('textarea');
+  const buf = term.buffer.active;
+  logToMain('debug', `IME ${phase}`, {
+    tabId,
+    textarea: rect(textarea),
+    style: textarea ? [textarea.style.left, textarea.style.top, textarea.style.width] : null,
+    compositionView: rect(container.querySelector('.composition-view')),
+    screen: rect(container.querySelector('.xterm-screen')),
+    文字数: textarea ? textarea.value.length : null,
+    cursor: [buf.cursorX, buf.cursorY],
+    cursorHidden: t.cursorHidden,
+    imeAnchor: t.imeAnchor ? [t.imeAnchor.x, t.imeAnchor.y] : null,
+    出力からの経過ms: Date.now() - t.lastOutputAt,
+    size: [term.cols, term.rows],
+    window: [window.screenX, window.screenY, window.innerWidth, window.innerHeight],
+    body: [document.body.scrollWidth, document.documentElement.scrollLeft],
+    dpr: window.devicePixelRatio,
+    display: [window.screen.width, window.screen.height],
+    focus: document.hasFocus(),
+  });
 }
 
 const STATUS_LABELS = {

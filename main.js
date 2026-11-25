@@ -13,8 +13,9 @@
 //                                           (記録は変更せずそのまま次回に残す)
 //   - ウィンドウが閉じる(=アプリ終了)     -> 記録を確定させてから全PTYを止める
 
-const { app, BrowserWindow, ipcMain, Menu, clipboard, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, clipboard, dialog, shell, screen } = require('electron');
 const path = require('node:path');
+const os = require('node:os');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const pty = require('@lydell/node-pty');
@@ -634,6 +635,14 @@ function main() {
       electron: process.versions.electron,
       userData: app.getPath('userData'),
       詳細ログ: logger.isDebug(),
+    });
+    // 変換候補の位置ずれなど、画面の倍率や OS の版で変わる不具合を追うための記録
+    log.info('画面の構成', {
+      os: os.release(),
+      displays: screen.getAllDisplays().map((d) => ({
+        bounds: [d.bounds.x, d.bounds.y, d.bounds.width, d.bounds.height],
+        scale: d.scaleFactor,
+      })),
     });
     const 削除数 = logger.pruneOldLogs();
     if (削除数 > 0) log.debug('古いログを削除しました', { 件数: 削除数 });
